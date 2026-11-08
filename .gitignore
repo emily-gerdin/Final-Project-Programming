@@ -1,0 +1,30 @@
+# =============================================================================
+# .gitignore -- Python data-science project
+# =============================================================================
+
+# --- Secrets (never commit) --------------------------------------------------
+.env
+.env.*
+kaggle.json
+.streamlit/secrets.toml
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# --- Data files (too large for GitHub; re-downloadable) ----------------------
+*.csv
+*.csv.gz
+*.parquet
+data/
+processed/
+archive/
+archive.zip
+
+# --- Noise -------------------------------------------------------------------
+.DS_Store
+*.log

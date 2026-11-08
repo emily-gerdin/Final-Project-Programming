@@ -1,0 +1,39 @@
+# =============================================================================
+# requirements.txt
+# -----------------------------------------------------------------------------
+# "Top Reviewed New York City Travel Planner"
+# Master's in Data Science - Programming for Data Science capstone
+#
+# Install everything with:
+#     pip install -r requirements.txt
+#
+# Tested on Python 3.10 - 3.14 (macOS / Windows / Linux).
+# =============================================================================
+
+# --- Core data wrangling ------------------------------------------------------
+pandas>=2.0.0            # DataFrames, CSV/JSON reading, groupby aggregation
+numpy>=1.24.0            # numeric arrays; quantiles for the IQR outlier fence
+scipy>=1.10.0            # statistical helpers used in the EDA module
+
+# --- Web application (the deliverable) ---------------------------------------
+streamlit>=1.30.0        # multi-tab UI, sliders, selectboxes, caching, spinners
+pydeck>=0.8.0            # deck.gl map layers: HeatmapLayer + marker clustering
+plotly>=5.18.0           # EDA charts + correlation matrix
+statsmodels>=0.14.0      # OLS trend line in the reviews-vs-price scatter plot
+
+# --- Data acquisition ---------------------------------------------------------
+kagglehub>=0.2.0         # modern Kaggle API downloader (routes through Kaggle)
+kaggle>=1.6.0            # classic Kaggle API client (used as a fallback)
+geopy>=2.4.0             # Nominatim geocoding (map search box)
+
+# --- NLP sentiment analysis (local, no API key required) ----------------------
+vaderSentiment>=3.3.2    # primary engine: tuned for short review text
+textblob>=0.17.1         # alternative engine (polarity + subjectivity)
+
+# --- LLM integration ----------------------------------------------------------
+openai>=1.10.0           # OpenAI Chat Completions client
+google-generativeai>=0.3.2  # Google Gemini client (alternative provider)
+
+# --- Documentation / build tooling -------------------------------------------
+reportlab>=4.0.0         # renders the step-by-step guide PDF
+Pillow>=10.0.0           # image prep for the hero banner
