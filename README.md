@@ -7,7 +7,21 @@ Capstone project — *Programming for Data Science*.
 
 ---
 
-## What it does
+## Project purpose and overview
+
+The Top Reviewed NYC Travel Planner answers a practical question: *if you want to
+book an Airbnb in New York City, which stays are actually the best-reviewed,
+where are they, and what do the reviews say about them?*
+
+The app acquires 48,895 listings from the **Kaggle API** plus 200,000 review
+comments from the Inside Airbnb NYC archive, cleans and analyses them, scores the
+review text with VADER sentiment analysis, and lets a **Google Gemini** LLM write
+a natural-language travel guide for whatever subset the user has filtered to.
+
+See [`PROJECT_REPORT.md`](PROJECT_REPORT.md) for the full write-up: objectives,
+methodology, results and lessons learned.
+
+### What it does
 
 | Tab | What you get |
 |---|---|
@@ -17,15 +31,20 @@ Capstone project — *Programming for Data Science*.
 
 ---
 
-## Quick start
+## Setup and installation
 
 ```bash
 # 1. Install dependencies (Python 3.10+)
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+```
 
-# 2. Run the app
+---
+
+## How to run the Streamlit app
+
+```bash
 streamlit run app.py
 ```
 
@@ -137,7 +156,7 @@ python eda.py                            # cleaning + charts on demo data
 
 ---
 
-## Data sources
+## API and data source details
 
 | Source | Used for | Licence |
 |---|---|---|
