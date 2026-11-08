@@ -28,3 +28,6 @@ archive.zip
 # --- Noise -------------------------------------------------------------------
 .DS_Store
 *.log
+
+# Assignment brief (not part of the deliverable)
+*.pdf
