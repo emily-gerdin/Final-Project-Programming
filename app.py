@@ -17,11 +17,17 @@ Sidebar
     and the LLM provider for the AI concierge.
 Tab 1 - Interactive Map
     pydeck map of NYC centred on (40.7128, -74.0060) with:
-      * a **GlobeView-style tilted perspective** over the five boroughs,
+      * a **tilted 3D perspective** over the five boroughs,
+      * a **satellite basemap by default** (Esri World Imagery, key-free),
+        switchable to the light/dark Carto vector styles,
       * a **HeatmapLayer** showing where highly-reviewed rentals cluster,
-      * **marker clustering** (``ColumnLayer`` + ``ScreenGridLayer`` fallback) so
-        48k points never overwhelm the canvas,
-      * tooltips with name, price, review count and sentiment score,
+      * **marker clustering** (``ColumnLayer``) with a white halo so the columns
+        stay legible on photographic imagery,
+      * a **hover card per listing** with a **photo preview**, name, price,
+        rating, review count, neighbourhood, room type and sentiment -- shown
+        on hover, not click (deck.gl tooltip)
+      * a **photo preview gallery** of the most-reviewed listings, in plain
+        HTML, as the fallback when the canvas cannot be hovered,
       * price + review-count sliders, borough/room-type filters and a geocoded
         area search.
 Tab 2 - EDA Insights
@@ -29,10 +35,26 @@ Tab 2 - EDA Insights
     price and review distributions, correlation matrix, and the volume of
     top-reviewed listings per borough.
 Tab 3 - AI Travel Guide
-    The "NY State * Travel Concierge": sends the top-reviewed listings (names,
+    The "NYC Travel Concierge": sends the top-reviewed listings (names,
     neighbourhoods, prices, review counts, sentiment) to an LLM which writes a
     natural-language guide for the current filters. Degrades to a deterministic
     offline report when no API key is present.
+
+Design system
+-------------
+The visual identity lives in ``.streamlit/config.toml`` (colours, Inter font,
+radii, metric styling, chart palette) so every native widget is themed without
+per-widget CSS. This file only adds what config.toml cannot express:
+
+* layout tweaks written against Streamlit's own CSS variables
+  (``var(--primary-color)``, ``var(--border-color)``...), so they follow the
+  theme instead of hard-coding colours;
+* the hero banner, which is presentation of the title rather than a widget;
+* equal-height card rows, achieved with CSS subgrid over ``st.columns``.
+
+Icons come from Material: widgets use Streamlit's native ``icon=`` /
+``:material/...:`` syntax, and markdown headings use the matching inline SVG
+from ``_MATERIAL_ICONS`` (same glyph, nothing to download).
 
 Architecture notes
 ------------------
@@ -53,6 +75,7 @@ layer plugs in.
 
 from __future__ import annotations
 
+import html
 import traceback
 from typing import Any
 
@@ -71,30 +94,348 @@ import nlp_sentiment as nlp
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title=cfg.APP_TITLE,
-    page_icon="🗽",
+    page_icon=":material/travel_explore:",   # Material icon as the favicon
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ---------------------------------------------------------------------------
-# BASE STYLES (kept minimal here; the full design system is Phase 4 polish)
+# DESIGN SYSTEM
 # ---------------------------------------------------------------------------
-st.markdown(
-    """
+# Colours, fonts, radii and chart palettes are defined once in
+# ``.streamlit/config.toml``. The block below is deliberately small: it covers
+# only page-level composition (hero, card grid, map frame) and reads
+# Streamlit's own CSS variables, so switching light/dark in the app menu keeps
+# everything consistent. Widgets are not restyled here -- they inherit the
+# theme natively.
+#
+# Variables Streamlit publishes on :root include --primary-color,
+# --background-color, --secondary-background-color, --text-color, --font and
+# --border-color. The wrappers used below -- stMainBlockContainer (main
+# content block), stLayoutWrapper (one per st.container) and the .stColumn /
+# .stVerticalBlock classes -- are the DOM structure Streamlit 1.6x emits; the
+# rules are written so that if a future release renames them the page simply
+# loses the card polish instead of breaking.
+_CARD_ROWS = """.st-key-cardrow > div > [data-testid="stHorizontalBlock"],
+.st-key-kpirow > div > [data-testid="stHorizontalBlock"]"""
+
+_CARD_COLUMNS = """.st-key-cardrow > div > [data-testid="stHorizontalBlock"] > .stColumn,
+.st-key-kpirow > div > [data-testid="stHorizontalBlock"] > .stColumn"""
+
+_CARD_STACKS = """.st-key-cardrow > div > [data-testid="stHorizontalBlock"] > .stColumn > .stVerticalBlock,
+.st-key-kpirow > div > [data-testid="stHorizontalBlock"] > .stColumn > .stVerticalBlock"""
+
+_CARD_WRAPPERS = """.st-key-cardrow > div > [data-testid="stHorizontalBlock"] > .stColumn > .stVerticalBlock > [data-testid="stLayoutWrapper"],
+.st-key-kpirow > div > [data-testid="stHorizontalBlock"] > .stColumn > .stVerticalBlock > [data-testid="stLayoutWrapper"]"""
+
+st.html(
+    f"""
     <style>
-    .block-container {padding-top: 1.4rem; padding-bottom: 2rem;}
-    div[data-testid="stMetric"] {
-        background: #f7f9fc;
-        border: 1px solid #e3e8ef;
-        border-radius: 12px;
-        padding: 12px 14px;
-    }
-    .nyc-title {font-size: 2.0rem; font-weight: 750; margin-bottom: 0; line-height: 1.1;}
-    .nyc-sub   {color: #5b6674; margin-top: 0.15rem; margin-bottom: 1rem;}
+    /* ---- Page rhythm -------------------------------------------------
+       Top/bottom padding and the content width now come from theme.paddingTop
+       / theme.paddingBottom in .streamlit/config.toml, so nothing here has to
+       fight the toolbar. Only the transparent header remains, which the theme
+       has no key for. */
+    [data-testid="stHeader"] {{background: transparent;}}
+
+    /* ---- Hero banner (presentation of the title, not a widget) -------- */
+    .hero-card {{
+        position: relative;
+        padding: 2.1rem 2.2rem 1.9rem;
+        border-radius: 1.25rem;
+        overflow: hidden;
+        color: #FFFFFF;
+        background:
+            radial-gradient(900px 320px at 88% -25%, rgba(255, 56, 92, 0.55), transparent 60%),
+            radial-gradient(600px 240px at 0% 120%, rgba(56, 189, 248, 0.28), transparent 65%),
+            linear-gradient(135deg, #14171F 0%, #1F2430 55%, #2A1E27 100%);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+    }}
+    .hero-eyebrow {{
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: #FFC6CF;
+        margin-bottom: 0.7rem;
+    }}
+    .hero-title {{
+        font-size: clamp(1.9rem, 3.4vw, 2.7rem);
+        font-weight: 800;
+        line-height: 1.08;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.6rem 0;
+        color: #FFFFFF;
+    }}
+    .hero-sub {{
+        max-width: 62ch;
+        color: rgba(255, 255, 255, 0.78);
+        font-size: 1.02rem;
+        line-height: 1.55;
+        margin: 0;
+    }}
+    .hero-meta {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin-top: 1.1rem;
+    }}
+    .hero-chip {{
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.28rem 0.7rem;
+        border-radius: 999px;
+        font-size: 0.76rem;
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.9);
+        background: rgba(255, 255, 255, 0.09);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        backdrop-filter: blur(4px);
+    }}
+
+    /* ---- Equal-height card rows ---------------------------------------
+       Each st.columns cell stacks its contents into one child block. Giving
+       those blocks a single shared row track plus
+       ``grid-template-rows: subgrid`` makes every column read from the parent
+       row, so a short card stretches to match its tallest neighbour.
+       ``grid-auto-flow: row`` keeps stacked columns from silently producing a
+       second row, which would break the subgrid span. Subgrid shipped in all
+       major browsers in Sept 2023; where it is unsupported these rules are
+       inert and cards simply take their content height. */
+    {_CARD_ROWS} {{
+        grid-auto-flow: row;
+        grid-template-rows: minmax(min-content, max-content);
+    }}
+    {_CARD_COLUMNS} {{
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+    }}
+    {_CARD_STACKS} {{
+        grid-template-rows: auto minmax(0, 1fr);
+        row-gap: 0.45rem;
+    }}
+    {_CARD_WRAPPERS} {{
+        display: flex;
+        flex-direction: column;
+    }}
+    {_CARD_WRAPPERS} > div {{
+        flex: 1 1 auto;
+    }}
+
+    /* ---- Card headings ------------------------------------------------ */
+    .card-head {{
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        font-weight: 700;
+        font-size: 0.95rem;
+        margin: 0;
+        color: var(--text-color);
+    }}
+    .card-head svg {{color: var(--primary-color); flex: none;}}
+    .card-note {{
+        color: var(--text-color);
+        opacity: 0.66;
+        font-size: 0.82rem;
+        margin: 0 0 0.2rem 0;
+    }}
+
+    /* ---- Map frame + legend ------------------------------------------- */
+    .map-frame [data-testid="stPydeckChart"],
+    .map-frame iframe {{border-radius: 0.9rem; overflow: hidden;}}
+    .map-legend {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 1.1rem;
+        padding: 0.55rem 0.9rem;
+        border-radius: 0.75rem;
+        border: 1px solid var(--border-color);
+        background: var(--secondary-background-color);
+        font-size: 0.8rem;
+        color: var(--text-color);
+        margin-top: 0.55rem;
+    }}
+    .map-legend .swatch {{
+        display: inline-block;
+        width: 0.72rem; height: 0.72rem;
+        border-radius: 0.2rem;
+        margin-right: 0.35rem;
+        vertical-align: -0.08rem;
+    }}
+    .map-legend .gradient {{
+        display: inline-block;
+        width: 4.5rem; height: 0.5rem;
+        border-radius: 999px;
+        margin: 0 0.35rem;
+        vertical-align: -0.06rem;
+        background: linear-gradient(90deg, #3D8BFF, #FF385C);
+    }}
+
+    /* ---- Listing grid (hover preview fallback) ------------------------
+       The deck.gl tooltip is the primary hover preview, but it needs a
+       WebGL canvas that can be pick the marker. The grid below gives every
+       listing the same photo + price card in plain HTML, so the feature still
+       works on a device/browser where the canvas cannot be hovered. */
+    .listing-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+        gap: 0.9rem;
+        margin-top: 0.4rem;
+    }}
+    .listing-card {{
+        position: relative;
+        border-radius: 0.85rem;
+        overflow: hidden;
+        background: var(--secondary-background-color);
+        border: 1px solid var(--border-color);
+        transition: transform 140ms ease, box-shadow 140ms ease,
+                    border-color 140ms ease;
+    }}
+    .listing-card:hover,
+    .listing-card:focus-within {{
+        transform: translateY(-2px);
+        border-color: var(--primary-color);
+        box-shadow: 0 12px 26px rgba(0, 0, 0, 0.16);
+    }}
+    .listing-card .thumb {{
+        display: block;
+        width: 100%;
+        aspect-ratio: 5 / 3;
+        object-fit: cover;
+        background: var(--secondary-background-color);
+    }}
+    .listing-card .body {{
+        padding: 0.55rem 0.7rem 0.65rem;
+        font-size: 0.8rem;
+        line-height: 1.35;
+        color: var(--text-color);
+    }}
+    .listing-card .name {{
+        font-weight: 700;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }}
+    .listing-card .meta {{opacity: 0.72; margin-top: 0.1rem;}}
+    .listing-card .price {{
+        font-weight: 700;
+        color: var(--primary-color);
+        margin-top: 0.2rem;
+    }}
+    .listing-card .preview {{
+        position: absolute;
+        inset: auto 0 0 0;
+        padding: 0.5rem 0.7rem;
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: #FFFFFF;
+        background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.62));
+        opacity: 0;
+        transition: opacity 140ms ease;
+    }}
+    .listing-card:hover .preview,
+    .listing-card:focus-within .preview {{opacity: 1;}}
     </style>
-    """,
-    unsafe_allow_html=True,
+    """
 )
+# ---------------------------------------------------------------------------
+# MATERIAL ICONS
+# ---------------------------------------------------------------------------
+# Streamlit 1.67 renders Material Symbols natively wherever an ``icon=`` or
+# ``:material/name:`` argument exists (buttons, tabs, expanders, metrics,
+# alerts, navigation). Markdown headings have no icon slot, so the same glyphs
+# are inlined here as SVG from the Material Icons set (Apache-2.0). Keeping the
+# SVG markup in one dict means a heading icon is a one-word change and every
+# icon shares the same 24px grid, stroke and colour rule (``currentColor``).
+#
+# Icon names are the Material Icons ("filled") names; the equivalent
+# Material Symbol string for native parameters is given next to each entry.
+_MATERIAL_ICONS: dict[str, str] = {
+    # travel_explore
+    "explore": "<circle cx='12' cy='12' r='3.5'/><path d='M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z'/><path d='m16.5 7.5-4.6 1.9-1.9 4.6 4.6-1.9z'/>",
+    # map
+    "map": "<path d='M20.5 3 17 4.8 7 3 3.5 4.8v16L7 19l10 1.8 3.5-1.8zM15 18.5 9 17V5.5L15 7zM5 17V5.5l2-1V16zm14 1.5-2 1V10l2 1z'/>",
+    # tune
+    "tune": "<path d='M3 17v2h6v-2zM3 5v2h10V5zm10 16v-2h8v-2h-8v-2h-2v6zM7 9v2H3v2h4v2h2V9zm14 4v-2H11v2zm-6-4h2V7h4V5h-4V3h-2z'/>",
+    # insights
+    "insights": "<path d='M21 8a2 2 0 0 0-1.45.82l-3.2-3.2A2 2 0 0 0 16.5 4a2 2 0 1 0-3.94.5L9.5 7.5A2 2 0 1 0 6 9.5l-.5.5L4.5 9A2 2 0 1 0 3 11.5 2 2 0 0 0 4.5 13l1 1a2 2 0 1 0 2.5 2.5l3-3a2 2 0 0 0 2.5-2.5 2 2 0 0 0-.18-.82l3.2-3.2A2 2 0 1 0 21 8zM4.5 10.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm2.5 5a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm4.5-5a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm3.5-4a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm4.5 3a1 1 0 1 0 0-2 1 1 0 0 0 0 2z'/>",
+    # smart_toy
+    "concierge": "<path d='M20 9V7c0-1.66-1.34-3-3-3h-3c0-1.1-.9-2-2-2s-2 .9-2 2H7C5.34 4 4 5.34 4 7v2c0 1.66 1.34 3 3 3h3c0 1.1.9 2 2 2s2-.9 2-2h3c1.66 0 3-1.34 3-3zM7 10c-.55 0-1-.45-1-1V7c0-.55.45-1 1-1h3v4zm7 0h-3V6h3c.55 0 1 .45 1 1v2c0 .55-.45 1-1 1zm-3 2c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm9.87 7.1A2 2 0 0 0 19 17H5a2 2 0 0 0-1.87 2.1c.1.9.87 1.6 1.87 1.6h12.96c1 0 1.77-.7 1.91-1.6z'/>",
+    # cleaning_services
+    "cleaning": "<path d='M16 11h1v2c0 .55.45 1 1 1s1-.45 1-1v-2a2 2 0 0 0-2-2h-1V7c0-1.1-.9-2-2-2h-1V3a1 1 0 0 0-2 0v2h-1c-1.1 0-2 .9-2 2v12H5a1 1 0 0 0 0 2h10a1 1 0 0 0 0-2h-3V7h3v4z'/>",
+    # workspace_premium
+    "premium": "<circle cx='12' cy='8' r='4'/><path d='M9 13.5 7 21l5-2.5L17 21l-2-7.5a7 7 0 0 1-6 0z'/>",
+    # bar_chart
+    "bar_chart": "<path d='M5 9.2h3V19H5zM10.6 5h2.8v14h-2.8zm5.6 8H19v6h-2.8z'/>",
+    # hub / share
+    "hub": "<path d='M21 6.5a2.5 2.5 0 1 0-3.5-2.3L14 6.7a6 6 0 0 0-4.4.6L6.9 4.6A2.5 2.5 0 1 0 5 6.4l1 1.6A6 6 0 0 0 8 17.2l-1 1.6A2.5 2.5 0 1 0 9.5 21l1.6-1a6 6 0 0 0 1.8 0l1.6 1a2.5 2.5 0 1 0 1.5-2.2l-.9-1.5A6 6 0 0 0 18 12.5c0-1-.25-1.95-.7-2.8l1.6-1a2.5 2.5 0 0 0 2.1-2.2zM12 15a3 3 0 1 1 0-6 3 3 0 0 1 0 6z'/>",
+    # table_chart
+    "table": "<path d='M10 10.02h5V21h-5zM17 21h3a2 2 0 0 0 2-2v-9h-5zM20 3H5a2 2 0 0 0-2 2v3h19V5a2 2 0 0 0-2-2zM3 19a2 2 0 0 0 2 2h3V10H3z'/>",
+    # download
+    "download": "<path d='M12 17 8.5 13.5l1.4-1.4 1.1 1.1V4h2v9.2l1.1-1.1 1.4 1.4zM6 20v-2h12v2z'/>",
+    # whatshot (heatmap)
+    "heat": "<path d='M13.5 0.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z'/>",
+    # photo_camera
+    "camera": "<circle cx='12' cy='12' r='3.2'/><path d='M9 2 7.2 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3.2L15 2zm3 15.5A5.5 5.5 0 1 1 12 6.5a5.5 5.5 0 0 1 0 11z'/>",
+    # layers
+    "layers": "<path d='m11.99 18.54-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27z'/>",
+}
+
+
+def material_icon(name: str, size: int = 18) -> str:
+    """
+    Return one Material Icons glyph as an inline ``<svg>`` string.
+
+    Parameters
+    ----------
+    name:
+        Key in :data:`_MATERIAL_ICONS`, e.g. ``"explore"``.
+    size:
+        Rendered edge length in pixels.
+
+    Returns
+    -------
+    str
+        SVG markup that inherits its colour from the surrounding text
+        (``fill="currentColor"``), so it works in light and dark themes.
+    """
+    body = _MATERIAL_ICONS.get(name, _MATERIAL_ICONS["explore"])
+    return (
+        f"<svg xmlns='http://www.w3.org/2000/svg' width='{size}' height='{size}' "
+        f"viewBox='0 0 24 24' fill='currentColor' aria-hidden='true' "
+        f"style='vertical-align:-0.18em'>{body}</svg>"
+    )
+
+
+def card_title(icon: str, text: str, note: str = "") -> str:
+    """
+    Build the HTML for a card heading with a Material icon and optional note.
+
+    Parameters
+    ----------
+    icon:
+        Material icon key passed to :func:`material_icon`.
+    text:
+        Heading text (already in Title Case).
+    note:
+        Small muted line under the heading; omit for none.
+
+    Returns
+    -------
+    str
+        HTML fragment; render with ``st.markdown(..., unsafe_allow_html=True)``.
+    """
+    heading = f"<p class='card-head'>{material_icon(icon)}<span>{html.escape(text)}</span></p>"
+    if note:
+        heading += f"<p class='card-note'>{html.escape(note)}</p>"
+    return heading
+
+
 
 
 # ===========================================================================
@@ -213,6 +554,29 @@ def geocode_cached(query: str) -> tuple[float, float, str] | None:
 # ===========================================================================
 # SECTION 2 - SIDEBAR
 # ===========================================================================
+def hex_to_rgb(value: str) -> tuple[int, int, int]:
+    """
+    Convert a ``#RRGGBB`` string to an ``(r, g, b)`` tuple.
+
+    deck.gl colour accessors need integer RGB triples, while the palette lives
+    in CSS notation in ``config.UI_PALETTE``, so the two need bridging in one
+    obvious place.
+
+    Parameters
+    ----------
+    value:
+        Hex colour, with or without the leading ``#``.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        Channels in 0-255.
+    """
+    raw = value.lstrip("#")
+    if len(raw) == 3:                       # #abc shorthand
+        raw = "".join(ch * 2 for ch in raw)
+    return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+
 def render_sidebar() -> dict[str, Any]:
     """
     Draw the sidebar controls and return the chosen settings.
@@ -222,18 +586,29 @@ def render_sidebar() -> dict[str, Any]:
     dict[str, Any]
         ``force_download``, ``reviews_limit``, ``engine``, ``llm_provider``.
     """
-    st.sidebar.title("🗽 NYC Travel Planner")
-    st.sidebar.caption("Capstone - Programming for Data Science")
+    st.sidebar.markdown(
+        f"<div style='display:flex;align-items:center;gap:.55rem;"
+        f"color:var(--primary-color);font-weight:800;font-size:1.05rem;"
+        f"letter-spacing:-.01em'>{material_icon('explore', 24)}"
+        f"<span style='color:var(--text-color)'>NYC Travel Planner</span></div>",
+        unsafe_allow_html=True,
+    )
+    st.sidebar.caption("Capstone Project - Programming for Data Science")
 
-    with st.sidebar.expander("1. Data source", expanded=True):
+    with st.sidebar.expander("Data Source", icon=":material/database:", expanded=True):
         if da.kaggle_credentials_available():
-            st.success("Kaggle credentials detected.")
+            st.success("Kaggle credentials detected.", icon=":material/check_circle:")
         else:
             st.warning(
                 "No Kaggle credentials found, so the app will use the Inside "
-                "Airbnb mirror or demo data. See README step 3 to add your key."
+                "Airbnb mirror or demo data. See README step 3 to add your key.",
+                icon=":material/key_off:",
             )
-        force_download = st.checkbox("Force re-download", value=False)
+        force_download = st.checkbox(
+            "Force re-download",
+            value=False,
+            help="Ignore the cached CSVs in data/ and fetch a fresh copy.",
+        )
         reviews_limit = st.select_slider(
             "Max reviews to score",
             options=[10_000, 50_000, 100_000, 250_000],
@@ -242,7 +617,7 @@ def render_sidebar() -> dict[str, Any]:
                  "average sentiment per listing.",
         )
 
-    with st.sidebar.expander("2. Sentiment engine", expanded=False):
+    with st.sidebar.expander("Sentiment Engine", icon=":material/sentiment_satisfied:"):
         engine = st.radio(
             "NLP engine",
             options=["vader", "textblob"],
@@ -253,7 +628,7 @@ def render_sidebar() -> dict[str, Any]:
         st.caption("VADER is tuned for short review text; TextBlob is a simpler "
                    "polarity model kept as a comparison.")
 
-    with st.sidebar.expander("3. AI concierge", expanded=False):
+    with st.sidebar.expander("AI Concierge", icon=":material/smart_toy:"):
         st.write(llm.provider_status()["message"])
         llm_provider = st.selectbox(
             "LLM provider",
@@ -270,7 +645,8 @@ def render_sidebar() -> dict[str, Any]:
     st.sidebar.divider()
     st.sidebar.caption(
         "Data: Kaggle 'New York City Airbnb Open Data' (CC0) + Inside Airbnb "
-        "reviews. Geocoding: OpenStreetMap Nominatim."
+        "reviews. Geocoding: OpenStreetMap Nominatim. Photos: Unsplash. "
+        "Basemap: Esri World Imagery / CARTO."
     )
     return {
         "force_download": force_download,
@@ -283,9 +659,41 @@ def render_sidebar() -> dict[str, Any]:
 # ===========================================================================
 # SECTION 3 - HEADER
 # ===========================================================================
+def _hero_html(status_chip: str) -> str:
+    """
+    Compose the hero banner markup for :func:`render_header`.
+
+    Parameters
+    ----------
+    status_chip:
+        Label of the live-data chip (e.g. ``"Live Kaggle data"`` or
+        ``"Synthetic demo data"``).
+
+    Returns
+    -------
+    str
+        HTML for the hero card.
+    """
+    chips = (
+        f"<span class='hero-chip'>{material_icon('layers', 14)}48,895 listings</span>"
+        f"<span class='hero-chip'>{material_icon('bar_chart', 14)}"
+        f"{len(cfg.BOROUGHS)} boroughs</span>"
+        f"<span class='hero-chip'>{material_icon('camera', 14)}{status_chip}</span>"
+    )
+    return (
+        f"<div class='hero-card'>"
+        f"<div class='hero-eyebrow'>{material_icon('explore', 15)}"
+        f"NYC Airbnb Intelligence</div>"
+        f"<h1 class='hero-title'>{html.escape(cfg.APP_TITLE)}</h1>"
+        f"<p class='hero-sub'>{html.escape(cfg.APP_SUBTITLE)}</p>"
+        f"<div class='hero-meta'>{chips}</div>"
+        f"</div>"
+    )
+
+
 def render_header(used_synthetic: bool) -> None:
     """
-    Render the page title and, when applicable, the synthetic-data banner.
+    Render the page hero banner and, when applicable, the synthetic-data alert.
 
     Parameters
     ----------
@@ -296,16 +704,19 @@ def render_header(used_synthetic: bool) -> None:
     -------
     None
     """
-    st.markdown(f"<p class='nyc-title'>🗽 {cfg.APP_TITLE}</p>", unsafe_allow_html=True)
-    st.markdown(f"<p class='nyc-sub'>{cfg.APP_SUBTITLE}</p>", unsafe_allow_html=True)
+    chip = "Synthetic demo data" if used_synthetic else "Live Kaggle data"
+    st.html(_hero_html(chip))
+    st.space("small")
 
     if used_synthetic:
         st.warning(
-            "⚠️ **SYNTHETIC DEMO DATA** - the real dataset could not be reached, "
+            "**Synthetic demo data** - the real dataset could not be reached, "
             "so every number below comes from generated data with an identical "
             "schema. Add Kaggle credentials (README step 3) and press "
-            "*Force re-download* for the real NYC Airbnb data."
+            "*Force re-download* for the real NYC Airbnb data.",
+            icon=":material/warning:",
         )
+
 
 
 
@@ -315,6 +726,104 @@ def render_header(used_synthetic: bool) -> None:
 # Free Carto vector basemaps (no API token needed, unlike Mapbox).
 BASEMAP_DARK = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
 BASEMAP_LIGHT = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+
+# --- Satellite basemap -------------------------------------------------------
+# deck.gl's ``TileLayer`` can render a pyramid of raster tiles from any XYZ
+# endpoint. Esri's World Imagery service is free for non-commercial use, needs
+# no API key and covers the whole planet, which is what makes a *true*
+# photographic satellite view possible without a Mapbox token.
+#
+# The style below is a MapLibre Style Spec document that pydeck passes straight
+# to deck.gl (deck.gl normalises ``{x}/{y}/{z}`` token order itself):
+#   sources  -- the XYZ raster tile template for Esri World Imagery;
+#   layers   -- one raster layer with a slight desaturation so the coral
+#               markers stay readable over photographic greens and greys;
+#   sky      -- a horizon gradient so the tilted 3D view ends in atmosphere
+#               rather than empty space, which is what makes it feel finished.
+#
+# Esri's terms require attribution ("Esri, Maxar, Earthstar Geographics and the
+# GIS User Community"); the UI prints it under the map.
+ESRI_ATTRIBUTION = "Esri, Maxar, Earthstar Geographics and the GIS User Community"
+_P = cfg.UI_PALETTE
+
+
+def satellite_style(scrim: bool = True) -> dict[str, Any]:
+    """
+    Build the deck.gl style object for the satellite basemap.
+
+    Kept as a function (not a module constant) so the palette in
+    ``config.UI_PALETTE`` is read at call time and the returned dict can be
+    mutated by tests without leaking state into the next render.
+
+    Parameters
+    ----------
+    scrim:
+        Add a faint dark wash above the imagery. Photographic tiles are bright
+        and busy; without it the heatmap and the white marker outlines lose
+        contrast over water and rooftops.
+
+    Returns
+    -------
+    dict[str, Any]
+        MapLibre-style document accepted by ``pdk.Deck(map_style=...)``.
+    """
+    layers: list[dict[str, Any]] = [
+        {
+            "id": "esri-world-imagery",
+            "type": "raster",
+            "source": "esri-world-imagery",
+            "paint": {
+                # A slight desaturation + contrast lift keeps the coral theme
+                # markers readable on top of photographic greens/greys.
+                "raster-saturation": -0.22,
+                "raster-contrast": 0.06,
+                "raster-brightness-min": 0.04,
+                "raster-brightness-max": 0.94,
+            },
+        }
+    ]
+    if scrim:
+        r, g, b, a = cfg.MAP_SATELLITE_SCRIM
+        layers.append(
+            {
+                "id": "imagery-scrim",
+                "type": "background",
+                "paint": {"background-color": f"rgba({r}, {g}, {b}, {a / 255:.3f})"},
+            }
+        )
+
+    return {
+        "version": 8,
+        "name": "nyc-satellite",
+        "sources": {
+            # deck.gl substitutes the {z}/{y}/{x} tokens itself; no escaping.
+            "esri-world-imagery": {
+                "type": "raster",
+                "tiles": [
+                    "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                    "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                ],
+                "tileSize": 256,
+                "attribution": ESRI_ATTRIBUTION,
+                "minzoom": 0,
+                "maxzoom": 19,
+            }
+        },
+        "layers": layers,
+        # The tilted NYC view ends in sky, not at the edge of the tiles. A deep
+        # ink-to-night gradient reads as atmosphere behind the 3D city; a pale
+        # horizon (the previous value) looked like a washed-out strip of paper
+        # above the map in the light theme.
+        "sky": {
+            "sky-color": "#0E1622",
+            "horizon-color": "#3A2A31",
+            "fog-color": _P["surface"],
+            "sky-horizon-blend": 0.55,
+            "horizon-fog-blend": 0.6,
+        },
+        "light": {"anchor": "viewport", "color": "#FFFFFF", "intensity": 1.0},
+    }
+
 
 
 def filter_listings(
@@ -381,59 +890,232 @@ def build_map_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     sentiment = pd.to_numeric(map_df["avg_sentiment"], errors="coerce")
     map_df["sentiment_value"] = sentiment.fillna(0.0)
 
-    # Colour by review volume: cool blue (few reviews) -> warm amber (many),
-    # so the most-reviewed listings are visually obvious on the map.
+    # Colour by review volume: cool blue (few reviews) -> coral (many), so the
+    # most-reviewed listings stand out on both vector and satellite basemaps.
+    # Per-channel interpolation is enough here because both stops are chosen to
+    # sit on the same lightness band, so the midpoint stays a clear violet-grey
+    # rather than the muddy brown an RGB ramp between blue and orange gives.
     reviews = map_df["number_of_reviews"].astype(float)
     low, high = float(reviews.min()), float(reviews.max())
     span = max(high - low, 1e-6)
-    map_df["colour"] = reviews.apply(
-        lambda n: [
-            int(70 + 185 * (n - low) / span),
-            int(130 + 45 * (1 - (n - low) / span)),
-            int(230 - 150 * (n - low) / span),
+
+    def _ramp(n: float) -> list[int]:
+        t = (n - low) / span
+        a = hex_to_rgb(_P["review_low"])
+        b = hex_to_rgb(_P["review_high"])
+        return [
+            int(round(a[0] + (b[0] - a[0]) * t)),
+            int(round(a[1] + (b[1] - a[1]) * t)),
+            int(round(a[2] + (b[2] - a[2]) * t)),
         ]
-    )
+
+    map_df["colour"] = reviews.apply(_ramp)
 
     sentiment_text = sentiment.apply(lambda v: "n/a" if pd.isna(v) else f"{v:+.2f}")
 
-    # Hover preview: show the listing photo inside the tooltip so users can see
-    # what the Airbnb looks like without clicking through. deck.gl renders raw
-    # HTML (including <img>) in browser tooltips, so a thumbnail appears on
-    # hover. Airbnb's CDN accepts an ``?im_w=`` size hint, so we request a small
-    # thumbnail instead of the full-resolution ``original/`` JPEG to keep hovers
-    # fast. Listings without a usable picture_url simply show no image.
+    # Hover preview: the tooltip is raw HTML, so a small <img> appears the
+    # moment the pointer rests on a marker -- no click required. The photo
+    # column is produced by ``da.listing_photo_urls`` (Unsplash thumbnails at
+    # ~10 KB each, because the Kaggle file has no photo column), so hovers stay
+    # instant even with thousands of markers.
     if "picture_url" in map_df.columns:
         picture = map_df["picture_url"].fillna("").astype(str).str.strip()
     else:
         picture = pd.Series("", index=map_df.index, dtype=str)
 
+    sentiments_ok = sentiment.notna()
+    sent_badge = sentiment.map(
+        lambda v: "" if pd.isna(v) else (
+            "Positive" if v >= 0.05 else "Neutral" if v > -0.05 else "Mixed")
+    )
+    # A missing score is silence, not a second label: "Unscored n/a" reads as a
+    # contradiction. The chip simply disappears when sentiment is unavailable.
+    sent_text = sentiment_text.where(sentiments_ok, "")
+
     def _photo_html(url: str) -> str:
+        """Return the <img> tag for a listing photo, or '' when there is none."""
         if not url.startswith("http"):
             return ""
-        # Airbnb's CDN only honours the ?im_w= width hint on its /im/pictures/
-        # path; the bare /pictures/ path always serves the multi-MB original.
-        # Rewriting to /im/pictures/ turns a 3 MB photo into a ~12 KB thumbnail.
-        if "muscache.com/pictures/" in url:
-            url = url.replace("muscache.com/pictures/", "muscache.com/im/pictures/", 1)
-        thumb = url + ("&" if "?" in url else "?") + "im_w=240"
+        w, h = cfg.MAP_TOOLTIP_PHOTO_WIDTH, cfg.MAP_TOOLTIP_PHOTO_HEIGHT
+        # html.escape keeps a stray quote in a URL from breaking the markup.
         return (
-            f'<img src="{thumb}" width="220" '
-            'style="border-radius:6px;margin-bottom:6px;display:block;"/>'
+            f"<img src='{html.escape(url, quote=True)}' width='{w}' height='{h}' "
+            "loading='lazy' decoding='async' alt='Listing photo' "
+            "style='border-radius:10px;object-fit:cover;display:block;"
+            "margin-bottom:9px;background:#2A2530'/>"
         )
 
     photo_html = picture.apply(_photo_html)
+    name_text = map_df["name"].astype(str).str.slice(0, 46).apply(html.escape)
+    place_text = (
+        map_df["neighbourhood"].astype(str).apply(html.escape) + ", "
+        + map_df["neighbourhood_group"].astype(str).apply(html.escape)
+    )
+    room_text = map_df["room_type"].astype(str).apply(html.escape)
+    price_text = (
+        "$" + map_df["price"].round(0).astype(int).astype(str).str.replace(
+            r"(\d)(?=(\d{3})+$)", r"\1,", regex=True)
+        + " <span style='font-weight:500;opacity:.7'>/ night</span>"
+    )
+    review_text = map_df["number_of_reviews"].astype(int).astype(str) + " reviews"
+
+    # Rating chip: the Kaggle file ships review_scores_rating as an empty
+    # column (100% null), so the chip is only rendered when the column actually
+    # holds values. An always-empty "No rating" pill would be noise. Rows with a
+    # missing score get ``display:none`` rather than an empty pill.
+    if "review_scores_rating" in map_df.columns:
+        rating = pd.to_numeric(map_df["review_scores_rating"], errors="coerce")
+    else:
+        rating = pd.Series(float("nan"), index=map_df.index)
+    rating_text = rating.map(lambda v: "" if pd.isna(v) else f"{v:.1f} / 5")
+    rating_style = rating_text.map(
+        lambda txt: "display:none" if txt == ""
+        else "background:rgba(255,255,255,.10);"
+             "border:1px solid rgba(255,255,255,.16);"
+             "border-radius:999px;padding:1px 7px;font-weight:600"
+    )
+
+    # Inline styles only (the tooltip renders in its own overlay), matched to
+    # the theme so the card looks like part of the product rather than a
+    # default deck.gl popup. ``display:none`` on a wrapper collapses the whole
+    # line, so the card never shows a half-empty row: neither chip present means
+    # no pill row at all.
+    pills_shown = sentiments_ok | rating_text.ne("")
+    pills_flex = pills_shown.map(
+        lambda ok: "display:flex;align-items:center;gap:6px;margin-bottom:5px;"
+                   "flex-wrap:wrap" if ok else "display:none"
+    )
+    sent_span_style = sentiments_ok.map(
+        lambda ok: ("background:rgba(255,56,92,.22);"
+                    "border:1px solid rgba(255,56,92,.45);border-radius:999px;"
+                    "padding:1px 7px;font-weight:600") if ok
+        else "display:none"
+    )
 
     map_df["tooltip"] = (
-        photo_html
-        + "<b>" + map_df["name"].astype(str).str.slice(0, 55) + "</b><br/>"
-        + "💵 $" + map_df["price"].round(0).astype(int).astype(str) + " / night<br/>"
-        + "⭐ " + map_df["number_of_reviews"].astype(int).astype(str) + " reviews<br/>"
-        + "📍 " + map_df["neighbourhood"].astype(str) + ", "
-        + map_df["neighbourhood_group"].astype(str) + "<br/>"
-        + "🛏️ " + map_df["room_type"].astype(str) + "<br/>"
-        + "😊 sentiment " + sentiment_text
+        "<div style=\"font-family:Inter,system-ui,-apple-system,sans-serif;"
+        "font-size:12px;line-height:1.4;color:#FFFFFF;width:"
+        f"{cfg.MAP_TOOLTIP_PHOTO_WIDTH + 26}px\">"
+        + photo_html
+        + "<div style='font-weight:750;font-size:13px;letter-spacing:-.01em;"
+          "margin-bottom:3px;white-space:nowrap;overflow:hidden;"
+          "text-overflow:ellipsis'>" + name_text + "</div>"
+        + "<div style='color:#FFC6CF;font-weight:700;font-size:13px;"
+          "margin-bottom:6px'>" + price_text + "</div>"
+        + "<div style='" + pills_flex + "'>"
+        + "<span style='" + rating_style + "'>" + rating_text + "</span>"
+        + "<span style='" + sent_span_style + "'>"
+        + sent_badge + " " + sent_text + "</span>"
+        + "</div>"
+        + "<div style='opacity:.82'>" + review_text + "</div>"
+        + "<div style='opacity:.82'>" + place_text + "</div>"
+        + "<div style='opacity:.82'>" + room_text + "</div>"
+        + "</div>"
     )
+    map_df["sentiment_known"] = sentiments_ok
     return map_df
+
+
+def _empty(value: Any) -> bool:
+    """Return True when a cell is missing, NaN or blank (tooltip safety)."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return not str(value).strip()
+
+
+def listing_card_html(row: Any, thumb_width: int = 220) -> str:
+    """
+    Build one HTML listing card: photo, name, price, place and hover overlay.
+
+    This is the same information the deck.gl tooltip shows, in plain HTML, so
+    the hover preview also works where a WebGL canvas cannot be picked. Photos
+    are requested as ~12 KB Unsplash thumbnails (see
+    ``config.MAP_PHOTO_THUMB_QUERY``) with ``loading="lazy"``, so a grid costs
+    one request per card that is actually scrolled into view.
+
+    Parameters
+    ----------
+    row:
+        One listing as a mapping (``Series`` or dict). Keys are read with
+        ``.get`` so a partially populated row never raises.
+    thumb_width:
+        Intrinsic width of the <img>; CSS stretches it to the grid cell.
+
+    Returns
+    -------
+    str
+        HTML fragment; render with ``st.html`` or ``st.markdown``.
+    """
+    get = row.get if hasattr(row, "get") else (lambda _k, default=None: default)
+
+    def _s(key: str, fallback: str = "") -> str:
+        value = get(key, fallback)
+        return fallback if _empty(value) else str(value)
+
+    name = html.escape(_s("name", "Unnamed stay")[:60])
+    place = html.escape(
+        f"{_s('neighbourhood')}, {_s('neighbourhood_group')}".strip(", ")
+    )
+    room = html.escape(_s("room_type"))
+    try:
+        price = f"${float(get('price', None)):,.0f}"
+    except (TypeError, ValueError):
+        price = "Price n/a"
+    try:
+        reviews = f"{int(get('number_of_reviews', None)):,} reviews"
+    except (TypeError, ValueError):
+        reviews = "Reviews n/a"
+    photo = _s("picture_url", "")
+    thumb = (
+        f"<img class='thumb' src='{html.escape(photo, quote=True)}' "
+        f"width='{thumb_width}' loading='lazy' decoding='async' alt=''/>"
+        if photo.startswith("http")
+        else "<div class='thumb'></div>"
+    )
+    return (
+        "<figure class='listing-card'>"
+        f"{thumb}"
+        "<figcaption class='body'>"
+        f"<div class='name'>{name}</div>"
+        f"<div class='meta'>{place} &middot; {room}</div>"
+        f"<div class='meta'>{reviews}</div>"
+        f"<div class='price'>{price} per night</div>"
+        "</figcaption>"
+        "<span class='preview'>Photo preview</span>"
+        "</figure>"
+    )
+
+
+def photo_gallery_html(listings: pd.DataFrame, limit: int = 12) -> str:
+    """
+    Render up to ``limit`` listings as a responsive HTML card grid.
+
+    Kept as one HTML fragment on purpose: ``st.image`` fetches every picture on
+    the server, whereas these are browser-side, lazy-loaded images that reveal
+    their overlay on hover exactly like the map tooltip.
+
+    Parameters
+    ----------
+    listings:
+        Filtered listings, already sorted however the caller wants them shown.
+    limit:
+        Maximum number of cards.
+
+    Returns
+    -------
+    str
+        HTML fragment; render with ``st.html``. Empty string when no rows.
+    """
+    if listings is None or len(listings) == 0:
+        return ""
+    shown = listings.head(limit)
+    cards = "".join(listing_card_html(row) for _, row in shown.iterrows())
+    return f"<div class='listing-grid'>{cards}</div>"
 
 
 
@@ -445,6 +1127,7 @@ def make_deck(
     show_heatmap: bool = True,
     cluster: bool = True,
     dark: bool = True,
+    satellite: bool = False,
 ) -> pdk.Deck:
     """
     Assemble the pydeck map with a heatmap layer plus clustered markers.
@@ -453,9 +1136,16 @@ def make_deck(
     -------------------
     NYC holds ~48k listings, far too many individual markers to read. deck.gl's
     ``ColumnLayer`` aggregates nearby listings into one extruded hexagon whose
-    height encodes how many listings it covers -- the deck.gl-native equivalent
+    height encodes how many reviews it covers -- the deck.gl-native equivalent
     of marker clustering, and it stays smooth at 48k points. Turning clustering
     off falls back to individual ``ScatterplotLayer`` dots.
+
+    Basemaps
+    --------
+    ``satellite=True`` swaps the Carto vector style for the photographic Esri
+    World Imagery style (:func:`satellite_style`). Markers and the heatmap keep
+    the same theme colours in both modes, and the heatmap is dialled back on
+    satellite so the imagery is not washed out.
 
     Parameters
     ----------
@@ -470,7 +1160,10 @@ def make_deck(
     cluster:
         Aggregate markers into hexagon columns instead of individual dots.
     dark:
-        Use the dark basemap (matches the app theme) rather than the light one.
+        Use the dark Carto basemap rather than the light one. Ignored when
+        ``satellite`` is True.
+    satellite:
+        Use the Esri World Imagery satellite basemap.
 
     Returns
     -------
@@ -481,7 +1174,9 @@ def make_deck(
 
     if show_heatmap and not map_df.empty:
         # Density of highly reviewed rentals: weighting by review count makes
-        # hot spots highlight where the most-reviewed stays concentrate.
+        # hot spots highlight where the most-reviewed stays concentrate. On
+        # satellite the heatmap is dialled back (config.MAP_SATELLITE_*) so the
+        # imagery still reads through it.
         layers.append(
             pdk.Layer(
                 "HeatmapLayer",
@@ -489,9 +1184,34 @@ def make_deck(
                 get_position=["longitude", "latitude"],
                 get_weight="number_of_reviews",
                 radiusPixels=45,
-                intensity=1.1,
+                intensity=(cfg.MAP_SATELLITE_HEATMAP_INTENSITY if satellite
+                           else cfg.MAP_VECTOR_HEATMAP_INTENSITY),
                 threshold=0.06,
-                opacity=0.65,
+                opacity=(cfg.MAP_SATELLITE_HEATMAP_OPACITY if satellite
+                         else cfg.MAP_VECTOR_HEATMAP_OPACITY),
+                pickable=False,
+            )
+        )
+
+    # On satellite imagery neither the coral nor the blue end of the review ramp
+    # survives a bright rooftop or a green park on its own, so every marker gets
+    # an opaque white outline (a halo). On the vector basemaps a softer outline
+    # is enough. The halo is drawn as a slightly larger backdrop layer so it
+    # reads as a ring rather than as a fat border.
+    outline = [255, 255, 255, 235] if satellite else [255, 255, 255, 120]
+
+    if satellite and not map_df.empty:
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                id="marker-halo",
+                data=map_df,
+                get_position=["longitude", "latitude"],
+                get_fill_color=[255, 255, 255, 210],
+                get_radius=120,
+                radius_min_pixels=5,
+                radius_max_pixels=22,
+                opacity=0.55,
                 pickable=False,
             )
         )
@@ -502,15 +1222,20 @@ def make_deck(
                 "ColumnLayer",
                 data=map_df,
                 get_position=["longitude", "latitude"],
+                get_fill_color="colour",
                 radius=260,
                 elevation_scale=8,
                 elevation_range=[0, 2200],
                 get_elevation="number_of_reviews",
-                get_fill_color="colour",
                 extruded=True,
                 pickable=True,
                 auto_highlight=True,
-                opacity=0.85,
+                opacity=0.9 if satellite else 0.85,
+                # Outlined on both basemaps: the white edge is what stops the
+                # columns bleeding into each other at a low zoom.
+                stroked=True,
+                get_line_color=outline,
+                line_width_min_pixels=2 if satellite else 1,
             )
         )
     elif not map_df.empty:
@@ -521,15 +1246,20 @@ def make_deck(
                 get_position=["longitude", "latitude"],
                 get_fill_color="colour",
                 get_radius=70,
-                radius_min_pixels=3,
+                radius_min_pixels=4,
                 radius_max_pixels=18,
                 pickable=True,
                 auto_highlight=True,
                 stroked=True,
-                get_line_color=[255, 255, 255, 120],
-                line_width_min_pixels=1,
+                get_line_color=outline,
+                line_width_min_pixels=2 if satellite else 1,
             )
         )
+
+    if satellite:
+        map_style: Any = satellite_style()
+    else:
+        map_style = BASEMAP_DARK if dark else BASEMAP_LIGHT
 
     view_state = pdk.ViewState(
         latitude=lat, longitude=lon, zoom=zoom,
@@ -538,12 +1268,30 @@ def make_deck(
     return pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
-        map_style=BASEMAP_DARK if dark else BASEMAP_LIGHT,
+        map_style=map_style,
+        # pydeck only accepts a dict ``map_style`` together with the "mapbox"
+        # provider value; it means "use the style document I supplied", not
+        # "use Mapbox's servers". No Mapbox token is read or sent -- the style
+        # above points at Esri's public tile service -- so this keeps the
+        # satellite view key-free, unlike a native Mapbox satellite style.
+        map_provider="mapbox",
+        # ``html`` is evaluated by deck.gl against the hovered row, so the
+        # ``{tooltip}`` placeholder is replaced with the photo card built in
+        # ``build_map_dataframe``. deck.gl shows it on hover (not click), which
+        # is exactly the interaction asked for; the style block only draws the
+        # floating panel around it.
         tooltip={
             "html": "{tooltip}",
-            "style": {"backgroundColor": "#111827", "color": "white",
-                      "borderRadius": "8px", "padding": "8px 10px",
-                      "maxWidth": "260px"},
+            "style": {
+                "backgroundColor": "#12100F",
+                "color": "#F4F0EC",
+                "borderRadius": "14px",
+                "padding": "10px 12px 12px",
+                "border": "1px solid rgba(255,255,255,.10)",
+                "boxShadow": "0 18px 44px rgba(0,0,0,.55)",
+                "pointerEvents": "none",
+                "maxWidth": f"{cfg.MAP_TOOLTIP_PHOTO_WIDTH + 26}px",
+            },
         },
     )
 
@@ -552,9 +1300,84 @@ def make_deck(
 # ===========================================================================
 # SECTION 5 - TAB 1: INTERACTIVE MAP
 # ===========================================================================
+def card_row(name: str, spec: Any = 2) -> list[Any]:
+    """
+    Open an equal-height row of bordered cards and return the card contexts.
+
+    Parameters
+    ----------
+    name:
+        Unique row name, e.g. ``"distributions"``. Streamlit requires every
+        ``key`` to be unique on the page, so each row passes its own.
+    spec:
+        Column widths, as for ``st.columns`` -- ``2`` for two equal columns or
+        a list such as ``[1.1, 1]`` for uneven ones.
+
+    Returns
+    -------
+    list[Any]
+        Context managers, one per card. Use them as::
+
+            left, right = card_row("work")
+            with left:
+                st.plotly_chart(...)
+
+    Notes
+    -----
+    Same DOM as :func:`kpi_cards`: a keyed container (``.st-key-cardrow``)
+    around the columns, then one bordered container per cell. The keyed
+    wrapper is what the subgrid CSS rules need, so keep the call inside the
+    design-system block's reach and do not nest it inside ``st.columns``.
+    ``st.columns`` cannot take a ``key`` itself, which is why the container
+    sits outside it.
+    """
+    with st.container(key=f"cardrow-{name}"):
+        row_columns = st.columns(spec)
+    # ``row_columns`` remain valid contexts after the ``with`` block closes, so
+    # each cell can be turned into its own bordered container here.
+    return [column.container(border=True) for column in row_columns]
+
+
+def kpi_cards(name: str, specs: list[tuple[str, str, str]], columns: int = 4) -> None:
+    """
+    Render a row of equal-height metric cards.
+
+    Parameters
+    ----------
+    name:
+        Unique row name, e.g. ``"map-kpis"`` (Streamlit keys must be unique).
+    specs:
+        ``(icon, label, value)`` triples. ``icon`` is a Material icon string
+        such as ``":material/reviews:"`` (Streamlit's native metric icon).
+    columns:
+        Number of cards per row; rows wrap automatically.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    ``st.columns`` has no ``key`` argument, but ``st.container`` does, and a
+    keyed container emits a ``.st-key-<key>`` class -- the hook the CSS subgrid
+    rules in the design-system block use to stretch every card in the row to
+    the height of the tallest one. Hence the nesting
+    ``st.container(key="kpirow-<name>")`` > ``st.columns`` > bordered containers.
+    """
+    with st.container(key=f"kpirow-{name}"):
+        row_columns = st.columns(columns)
+        for column, (icon, label, value) in zip(row_columns, specs):
+            with column, st.container(border=True):
+                st.metric(label, value, icon=icon)
+
+
 def render_kpis(filtered: pd.DataFrame) -> None:
     """
-    Render the four headline metrics for the current selection.
+    Render the four headline metrics for the current selection as one card row.
+
+    Each metric sits in its own bordered container inside a fixed ``key``-ed
+    columns row (``key="kpirow"``), which is what the CSS subgrid rules in the
+    design-system block use to make all four cards the same height.
 
     Parameters
     ----------
@@ -567,19 +1390,19 @@ def render_kpis(filtered: pd.DataFrame) -> None:
     """
     if filtered.empty:
         st.info("No listings match these filters - widen the price range or the "
-                "minimum review count.")
+                "minimum review count.", icon=":material/filter_alt_off:")
         return
 
     summary = nlp.sentiment_summary(filtered)
-    columns = st.columns(4)
-    columns[0].metric("Listings shown", f"{len(filtered):,}")
-    columns[1].metric("Median price", f"${filtered['price'].median():,.0f}")
-    columns[2].metric("Median reviews", f"{filtered['number_of_reviews'].median():,.0f}")
-    columns[3].metric(
-        "Avg sentiment",
-        "n/a" if summary["mean_sentiment"] is None else f"{summary['mean_sentiment']:+.2f}",
-        help="Mean VADER compound score across the filtered listings.",
-    )
+    kpi_cards("map-kpis", [
+        (":material/home_work:", "Listings Shown", f"{len(filtered):,}"),
+        (":material/payments:", "Median Nightly Price",
+         f"${filtered['price'].median():,.0f}"),
+        (":material/reviews:", "Median Review Count",
+         f"{filtered['number_of_reviews'].median():,.0f}"),
+        (":material/sentiment_satisfied:", "Average Sentiment",
+         "n/a" if summary["mean_sentiment"] is None else f"{summary['mean_sentiment']:+.2f}"),
+    ])
 
 
 def render_map_controls(top_reviewed: pd.DataFrame) -> dict[str, Any]:
@@ -595,52 +1418,75 @@ def render_map_controls(top_reviewed: pd.DataFrame) -> dict[str, Any]:
     -------
     dict[str, Any]
         ``price_range``, ``min_reviews``, ``boroughs``, ``room_types``,
-        ``show_heatmap``, ``cluster``, ``dark_map``, ``search``.
+        ``show_heatmap``, ``cluster``, ``basemap``, ``search``.
     """
     price_ceiling = int(min(cfg.PRICE_MAX, max(top_reviewed["price"].max(), 10)))
     review_ceiling = int(max(top_reviewed["number_of_reviews"].max(), 10))
 
-    row1 = st.columns([2.2, 1.5, 1.5])
-    with row1[0]:
-        price_range = st.slider(
-            "💵 Nightly price ($)",
-            min_value=1,
-            max_value=price_ceiling,
-            value=(int(top_reviewed["price"].quantile(0.05)),
-                   int(min(price_ceiling, top_reviewed["price"].quantile(0.90)))),
-            step=5,
+    with st.container(border=True):
+        st.markdown(
+            card_title("tune", "Filter The Map",
+                       "Narrow the listings every tab and the AI guide respond to."),
+            unsafe_allow_html=True,
         )
-    with row1[1]:
-        min_reviews = st.slider(
-            "⭐ Minimum number of reviews",
-            min_value=0,
-            max_value=review_ceiling,
-            value=int(cfg.TOP_REVIEWED_MIN_REVIEWS),
-            step=5,
-        )
-    with row1[2]:
-        show_heatmap = st.toggle("🔥 Review-density heatmap", value=True)
-        cluster = st.toggle("🧱 Cluster markers", value=True,
-                            help="Aggregate nearby listings into hexagonal columns.")
+        row1 = st.columns([2, 1.6, 1.3], vertical_alignment="bottom")
+        with row1[0]:
+            price_range = st.slider(
+                "Nightly Price ($)",
+                min_value=1,
+                max_value=price_ceiling,
+                value=(int(top_reviewed["price"].quantile(0.05)),
+                       int(min(price_ceiling, top_reviewed["price"].quantile(0.90)))),
+                step=5,
+                help="Nightly price band, in US dollars.",
+            )
+        with row1[1]:
+            min_reviews = st.slider(
+                "Minimum Reviews",
+                min_value=0,
+                max_value=review_ceiling,
+                value=int(cfg.TOP_REVIEWED_MIN_REVIEWS),
+                step=5,
+                help="Hide listings with fewer reviews than this.",
+            )
+        with row1[2]:
+            basemap = st.selectbox(
+                "Basemap",
+                options=list(cfg.MAP_BASEMAP_MODES),
+                index=list(cfg.MAP_BASEMAP_MODES).index(cfg.MAP_DEFAULT_BASEMAP),
+                icon=":material/layers:",
+                help="Satellite uses Esri World Imagery (photographic tiles); "
+                     "Dark and Light use the CARTO vector styles.",
+            )
 
-    row2 = st.columns([1.5, 1.5, 1.2])
-    with row2[0]:
-        boroughs = st.multiselect(
-            "🏙️ Borough", options=list(cfg.BOROUGHS), default=[],
-            placeholder="All boroughs",
-        )
-    with row2[1]:
-        room_types = st.multiselect(
-            "🛏️ Room type", options=list(cfg.ROOM_TYPES), default=[],
-            placeholder="All room types",
-        )
-    with row2[2]:
-        dark_map = st.toggle("🌙 Dark basemap", value=True)
+        row2 = st.columns([1.5, 1.5, 1, 1], vertical_alignment="bottom")
+        with row2[0]:
+            boroughs = st.multiselect(
+                "Borough", options=list(cfg.BOROUGHS), default=[],
+                placeholder="All boroughs",
+            )
+        with row2[1]:
+            room_types = st.multiselect(
+                "Room Type", options=list(cfg.ROOM_TYPES), default=[],
+                placeholder="All room types",
+            )
+        with row2[2]:
+            show_heatmap = st.toggle(
+                "Heatmap", value=True,
+                help="Weight each listing by its review count.",
+            )
+        with row2[3]:
+            cluster = st.toggle(
+                "Cluster Markers", value=True,
+                help="Aggregate nearby listings into hexagonal columns.",
+            )
 
-    search = st.text_input(
-        "🔎 Centre the map on a neighbourhood (Nominatim geocoding)",
-        placeholder="e.g. Williamsburg, Harlem, Astoria, Mott Haven",
-    )
+        search = st.text_input(
+            "Centre On A Neighbourhood",
+            placeholder="e.g. Williamsburg, Harlem, Astoria, Mott Haven",
+            help="Resolved with OpenStreetMap Nominatim geocoding.",
+            icon=":material/search:",
+        )
     return {
         "price_range": price_range,
         "min_reviews": min_reviews,
@@ -648,9 +1494,39 @@ def render_map_controls(top_reviewed: pd.DataFrame) -> dict[str, Any]:
         "room_types": room_types,
         "show_heatmap": show_heatmap,
         "cluster": cluster,
-        "dark_map": dark_map,
+        "basemap": basemap,
         "search": search,
     }
+
+
+def _map_legend(basemap: str) -> str:
+    """
+    Build the legend strip printed under the map.
+
+    Parameters
+    ----------
+    basemap:
+        Selected basemap label (``"Satellite"``, ``"Dark"`` or ``"Light"``).
+
+    Returns
+    -------
+    str
+        HTML for the legend; render with ``st.html``.
+    """
+    source = (ESRI_ATTRIBUTION if basemap == cfg.MAP_BASEMAP_SATELLITE
+              else "CARTO basemaps / OpenStreetMap")
+    return (
+        "<div class='map-legend'>"
+        "<span><span class='gradient'></span>Fewer to more reviews</span>"
+        "<span><span class='swatch' style='background:#FF385C'></span>"
+        "Column height = review volume</span>"
+        "<span>Hover a marker for the listing photo</span>"
+        f"<span style='margin-left:auto;opacity:.65'>"
+        f"Basemap: {html.escape(basemap)} &middot; {html.escape(source)}"
+        "</span>"
+        "</div>"
+    )
+
 
 
 
@@ -671,14 +1547,20 @@ def render_map_tab(top_reviewed: pd.DataFrame) -> pd.DataFrame:
     pandas.DataFrame
         The filtered listings (empty when nothing matches).
     """
-    st.subheader("Where are the most-reviewed stays?")
+    st.markdown(
+        f"### {material_icon('map', 22)} Where Are The Most-Reviewed Stays?",
+        unsafe_allow_html=True,
+    )
     st.caption(
-        "Height and colour encode review volume. Drag the sliders, pick boroughs "
-        "or room types, then click a column to read the listing details."
+        "Marker height and colour encode review volume. **Hover any marker** for "
+        "a hover card with that listing's photo, price, rating and review "
+        "sentiment. The satellite basemap is the default; switch to Dark or "
+        "Light for the CARTO vector styles."
     )
 
     if top_reviewed.empty:
-        st.error("No top-reviewed listings are available to map.")
+        st.error("No top-reviewed listings are available to map.",
+                 icon=":material/error:")
         return pd.DataFrame()
 
     controls = render_map_controls(top_reviewed)
@@ -700,14 +1582,16 @@ def render_map_tab(top_reviewed: pd.DataFrame) -> pd.DataFrame:
             if hit is None:
                 st.warning(
                     f"Could not find '{search}' in New York City. Try a borough "
-                    "or a well-known neighbourhood such as 'Bushwick'."
+                    "or a well-known neighbourhood such as 'Bushwick'.",
+                    icon=":material/location_off:",
                 )
             else:
                 centre_lat, centre_lon, zoom = float(hit[0]), float(hit[1]), 13
-                st.success(f"Centred on: {hit[2]}")
+                st.success(f"Centred on {hit[2]}.", icon=":material/location_on:")
         except Exception as exc:
             st.warning(f"Geocoding failed ({exc}). Showing the default NYC view.")
 
+    st.space("small")
     render_kpis(filtered)
     if filtered.empty:
         return filtered
@@ -721,7 +1605,8 @@ def render_map_tab(top_reviewed: pd.DataFrame) -> pd.DataFrame:
         plot_df = plot_df.sample(max_markers, random_state=42)
         st.info(
             f"Plotting a random sample of {max_markers:,} of {len(filtered):,} "
-            "matching listings for performance."
+            "matching listings for performance.",
+            icon=":material/speed:",
         )
 
     deck = make_deck(
@@ -729,16 +1614,36 @@ def render_map_tab(top_reviewed: pd.DataFrame) -> pd.DataFrame:
         lat=centre_lat, lon=centre_lon, zoom=zoom,
         show_heatmap=controls["show_heatmap"],
         cluster=controls["cluster"],
-        dark=controls["dark_map"],
+        dark=controls["basemap"] == cfg.MAP_BASEMAP_DARK,
+        satellite=controls["basemap"] == cfg.MAP_BASEMAP_SATELLITE,
     )
-    st.pydeck_chart(deck, width="stretch", height=620)
-    st.caption(
-        "Column height and colour encode review volume: blue = fewer reviews, "
-        "amber = the most-reviewed stays. The heatmap weights each listing by its "
-        "review count, so bright areas are the densest clusters of proven stays."
-    )
+    st.space("small")
+    with st.container(key="mapframe"):
+        st.pydeck_chart(deck, width="stretch", height=640)
+    st.html(_map_legend(controls["basemap"]))
 
-    with st.expander("📋 Top-reviewed listings table", expanded=False):
+    # --- hover preview gallery --------------------------------------------
+    # The deck.gl tooltip is the primary hover preview. This grid repeats the
+    # same photo card in plain HTML: it is the fallback for browsers or
+    # machines where WebGL picking is unavailable, and it doubles as a browsable
+    # strip of the top stays the current filters are pointing at.
+    with st.expander("Listing Photo Preview", icon=":material/photo_library:",
+                     expanded=False):
+        top_by_reviews = filtered.sort_values(
+            "number_of_reviews", ascending=False)
+        st.caption(
+            "The same photo cards the map shows on hover, for the 12 "
+            "most-reviewed stays in the current selection. Hover a card to "
+            "lift it."
+        )
+        gallery = photo_gallery_html(top_by_reviews, limit=12)
+        if gallery:
+            st.html(gallery)
+        else:
+            st.info("No listing photos are available for this selection.",
+                    icon=":material/image_not_supported:")
+
+    with st.expander("Top-Reviewed Listings Table", icon=":material/table_view:"):
         columns = [c for c in (
             "name", "neighbourhood_group", "neighbourhood", "room_type",
             "price", "number_of_reviews", "avg_sentiment", "sentiment_label",
@@ -748,10 +1653,11 @@ def render_map_tab(top_reviewed: pd.DataFrame) -> pd.DataFrame:
             width="stretch", hide_index=True,
         )
         st.download_button(
-            "⬇️ Download filtered listings (CSV)",
+            "Download Filtered Listings",
             data=filtered.to_csv(index=False).encode("utf-8"),
             file_name="nyc_top_reviewed.csv",
             mime="text/csv",
+            icon=":material/download:",
         )
     return filtered
 
@@ -785,45 +1691,57 @@ def render_eda_tab(
     -------
     None
     """
-    st.subheader("Exploratory data analysis")
+    st.markdown(
+        f"### {material_icon('insights', 22)} Exploratory Data Analysis",
+        unsafe_allow_html=True,
+    )
     st.caption("All figures use the cleaned listings table unless stated otherwise.")
 
     # --- 1. data quality --------------------------------------------------
-    st.markdown("#### 🧹 Data quality and preprocessing")
+    st.markdown(f"#### {material_icon('cleaning', 18)} Data Quality And Preprocessing",
+                unsafe_allow_html=True)
     outliers = audit.get("outliers", {}) or {}
     quality = da.data_quality_report(raw_listings, raw_reviews)
 
-    columns = st.columns(4)
-    columns[0].metric("Raw listings", f"{quality['listings_rows']:,}")
-    columns[1].metric("After cleaning", f"{int(audit.get('rows_out', 0)):,}")
-    columns[2].metric("Outlier rows removed", f"{int(outliers.get('rows_removed', 0)):,}")
-    columns[3].metric("Top-reviewed", f"{len(top_reviewed):,}")
+    kpi_cards("quality-kpis", [
+        (":material/inventory_2:", "Raw Listings", f"{quality['listings_rows']:,}"),
+        (":material/done_all:", "After Cleaning", f"{int(audit.get('rows_out', 0)):,}"),
+        (":material/delete_sweep:", "Outlier Rows Removed",
+         f"{int(outliers.get('rows_removed', 0)):,}"),
+        (":material/workspace_premium:", "Top-Reviewed", f"{len(top_reviewed):,}"),
+    ])
 
-    left, right = st.columns(2)
+    st.space("small")
+    left, right = card_row("quality", 2)
     with left:
-        st.markdown("**Missing values in the raw listings table**")
+        st.markdown(card_title("table", "Missing Values", "Raw listings table"),
+                    unsafe_allow_html=True)
         report = eda.missing_value_report(raw_listings)
         missing_only = report[report["missing_count"] > 0]
         st.dataframe(
             missing_only if not missing_only.empty
-            else pd.DataFrame({"status": ["No missing values found"]}),
+            else pd.DataFrame({"Status": ["No missing values found"]}),
             width="stretch", hide_index=True, height=230,
         )
     with right:
-        st.markdown("**IQR outlier policy**")
+        st.markdown(card_title("filter_alt", "Outlier Policy",
+                               "IQR fence plus business ceiling"),
+                    unsafe_allow_html=True)
         st.write(
-            f"- Price must be **> \\$0** and **<= \\${outliers.get('applied_ceiling', 'n/a')}** "
-            f"(Q3 + 1.5 x IQR = \\${outliers.get('upper_fence', 'n/a')}, capped at the "
-            f"\\${outliers.get('price_max', cfg.PRICE_MAX):,.0f} business ceiling)."
+            f"- Price must be **> \\\\$0** and **<= \\\\${outliers.get('applied_ceiling', 'n/a')}** "
+            f"(Q3 + 1.5 x IQR = \\\\${outliers.get('upper_fence', 'n/a')}, capped at the "
+            f"\\\\${outliers.get('price_max', cfg.PRICE_MAX):,.0f} business ceiling)."
         )
         st.write(f"- Price outliers removed: **{int(outliers.get('rows_removed', 0)):,}**")
         st.write(f"- Missing-coordinate rows removed: **{quality['missing_coordinates']:,}**")
         st.write(f"- Duplicate listing ids removed: **{audit.get('duplicates_removed', 0):,}**")
 
-    st.divider()
+    st.space("medium")
+
 
     # --- 2. "top reviewed" definition -------------------------------------
-    st.markdown("#### ⭐ How \"top reviewed\" is defined")
+    st.markdown(f"#### {material_icon('premium', 18)} How \\\"Top Reviewed\\\" Is Defined",
+                unsafe_allow_html=True)
     st.markdown(
         f"A listing qualifies when it has at least **{cfg.TOP_REVIEWED_MIN_REVIEWS} "
         f"reviews** and sits in the top **{int((1 - cfg.TOP_REVIEWED_QUANTILE) * 100)}% "
@@ -832,64 +1750,77 @@ def render_eda_tab(
         "would otherwise outrank proven stays."
     )
     if not top_reviewed.empty:
-        columns = st.columns(4)
-        columns[0].metric("Median reviews", f"{top_reviewed['number_of_reviews'].median():,.0f}")
-        columns[1].metric("Median price", f"${top_reviewed['price'].median():,.0f}")
-        columns[2].metric("Boroughs covered", f"{top_reviewed['neighbourhood_group'].nunique()}")
-        columns[3].metric(
-            "Avg sentiment",
-            f"{top_reviewed['avg_sentiment'].mean():+.2f}"
-            if "avg_sentiment" in top_reviewed.columns
-            and top_reviewed["avg_sentiment"].notna().any() else "n/a",
-        )
+        kpi_cards("top-kpis", [
+            (":material/reviews:", "Median Reviews",
+             f"{top_reviewed['number_of_reviews'].median():,.0f}"),
+            (":material/payments:", "Median Price",
+             f"${top_reviewed['price'].median():,.0f}"),
+            (":material/location_city:", "Boroughs Covered",
+             f"{top_reviewed['neighbourhood_group'].nunique()}"),
+            (":material/sentiment_satisfied:", "Average Sentiment",
+             f"{top_reviewed['avg_sentiment'].mean():+.2f}"
+             if "avg_sentiment" in top_reviewed.columns
+             and top_reviewed["avg_sentiment"].notna().any() else "n/a"),
+        ])
 
-    st.divider()
+    st.space("medium")
 
     # --- 3. distributions -------------------------------------------------
-    st.markdown("#### 📊 Distributions")
-    left, right = st.columns(2)
+    st.markdown(f"#### {material_icon('bar_chart', 18)} Distributions",
+                unsafe_allow_html=True)
+    left, right = card_row("distributions", 2)
     with left:
         st.plotly_chart(eda.plot_price_distribution(clean), width="stretch")
     with right:
         st.plotly_chart(eda.plot_reviews_distribution(clean), width="stretch")
 
-    st.divider()
+    st.space("medium")
 
     # --- 4. borough volume (the rubric's bar chart) -----------------------
-    st.markdown("#### 🏙️ Top-reviewed listings by borough")
-    st.plotly_chart(eda.plot_top_reviewed_by_borough(top_reviewed), width="stretch")
-    st.plotly_chart(eda.plot_price_vs_reviews(clean), width="stretch")
+    st.markdown(f"#### {material_icon('map', 18)} Volume By Borough",
+                unsafe_allow_html=True)
+    left, right = card_row("boroughs", 2)
+    with left:
+        st.plotly_chart(eda.plot_top_reviewed_by_borough(top_reviewed), width="stretch")
+    with right:
+        st.plotly_chart(eda.plot_price_vs_reviews(clean), width="stretch")
 
-    st.divider()
+    st.space("medium")
 
     # --- 5. correlations --------------------------------------------------
-    st.markdown("#### 🔗 Correlation analysis")
-    left, right = st.columns([1.1, 1])
+    st.markdown(f"#### {material_icon('hub', 18)} Correlation Analysis",
+                unsafe_allow_html=True)
+    left, right = card_row("correlations", [1.1, 1])
     with left:
         st.plotly_chart(eda.plot_correlation_heatmap(clean), width="stretch")
     with right:
-        st.markdown("**Correlation with number of reviews**")
+        st.markdown(card_title("table", "Correlation With Number Of Reviews"),
+                    unsafe_allow_html=True)
         correlations = eda.review_correlations(clean)
         if correlations.empty:
-            st.info("Not enough numeric columns to correlate.")
+            st.info("Not enough numeric columns to correlate.",
+                    icon=":material/info:")
         else:
             table = correlations.rename("correlation").reset_index()
-            table.columns = ["variable", "correlation"]
+            table.columns = ["Variable", "Correlation"]
             st.dataframe(table.round(3), width="stretch", hide_index=True)
 
-    st.divider()
+    st.space("medium")
 
     # --- 6. room type + sentiment ----------------------------------------
-    left, right = st.columns(2)
+    left, right = card_row("mix", 2)
     with left:
         st.plotly_chart(eda.plot_room_type_mix(clean), width="stretch")
     with right:
         if "avg_sentiment" in clean.columns and clean["avg_sentiment"].notna().any():
             st.plotly_chart(eda.plot_sentiment_by_borough(clean), width="stretch")
         else:
-            st.info("Sentiment scores are not available for this dataset.")
+            st.info("Sentiment scores are not available for this dataset.",
+                    icon=":material/info:")
 
-    with st.expander("📄 Top-reviewed listings preview (first 200 rows)"):
+    st.space("medium")
+    with st.expander("Top-Reviewed Listings Preview", icon=":material/table_chart:"):
+        st.caption("First 200 rows of the top-reviewed selection.")
         st.dataframe(top_reviewed.head(200), width="stretch", hide_index=True)
 
 
@@ -928,70 +1859,93 @@ def render_ai_tab(
     -------
     None
     """
-    st.subheader("🤖 NYC Travel Concierge")
+    st.markdown(
+        f"### {material_icon('concierge', 22)} NYC Travel Concierge",
+        unsafe_allow_html=True,
+    )
     st.caption(
         "The concierge reads a summary of your current map filters and writes a "
-        "travel guide. Only aggregated statistics are sent - never raw review text."
+        "guide in plain English. Only aggregated statistics are sent, never raw "
+        "review text."
     )
 
     working = filtered if filtered is not None and not filtered.empty else top_reviewed
     if working is None or working.empty:
-        st.error("There is no data to summarise yet.")
+        st.error("There is no data to summarise yet.", icon=":material/error:")
         return
 
     if filtered is None or filtered.empty:
         st.warning("The map has no matching listings, so the full top-reviewed set "
-                   "is being summarised instead.")
+                   "is being summarised instead.", icon=":material/filter_alt_off:")
 
     # --- build the payload ------------------------------------------------
     try:
         keywords = nlp.extract_keywords(scored_reviews) if not scored_reviews.empty else {}
         payload = llm.build_context_payload(working, keywords=keywords)
     except Exception as exc:
-        st.error(f"Could not build the summary payload: {exc}")
+        st.error(f"Could not build the summary payload: {exc}",
+                 icon=":material/error:")
         return
 
-    with st.expander("🔍 What the AI receives (aggregated JSON)", expanded=False):
+    with st.expander("What The AI Receives", icon=":material/data_object:"):
+        st.caption("Aggregated JSON payload sent with every request.")
         st.json(payload, expanded=2)
 
+    generate_col, status_col = st.columns([1, 2], vertical_alignment="center")
+    with generate_col:
+        generate = st.button("Generate Travel Guide", type="primary", width="stretch",
+                             icon=":material/auto_awesome:")
+    with status_col:
+        st.caption(f"Summarising {len(working):,} listings using the "
+                   f"**{llm_provider}** provider.")
 
-    if st.button("✍️ Generate travel guide", type="primary", width="stretch"):
+    if generate:
         try:
             with st.spinner("The concierge is writing your NYC guide..."):
                 report = llm.generate_travel_report(payload, provider=llm_provider)
             st.session_state["travel_report"] = report
         except Exception as exc:
-            st.error(f"The LLM call failed: {exc}")
+            st.error(f"The LLM call failed: {exc}", icon=":material/error:")
 
     report = st.session_state.get("travel_report")
     if report is None:
-        st.info("Press **Generate travel guide** to summarise your current filters.")
+        st.info("Press **Generate Travel Guide** to summarise your current filters.",
+                icon=":material/info:")
         return
 
     if report.warning:
-        st.warning(report.warning)
-    st.markdown(report.text)
+        st.warning(report.warning, icon=":material/warning:")
 
-    columns = st.columns(4)
-    columns[0].caption(f"Provider: **{report.provider}**")
-    columns[1].caption(f"Model: `{report.model}`")
-    columns[2].caption(f"Latency: {report.latency_seconds:.2f}s")
-    columns[3].caption(f"Tokens: {report.tokens:,}" if report.tokens else "Tokens: n/a")
+    with st.container(border=True):
+        st.markdown(report.text)
 
+    st.space("small")
+    kpi_cards("ai-meta", [
+        (":material/hub:", "Provider", report.provider),
+        (":material/memory:", "Model", report.model),
+        (":material/timer:", "Latency", f"{report.latency_seconds:.2f}s"),
+        (":material/toll:", "Tokens", f"{report.tokens:,}" if report.tokens else "n/a"),
+    ])
+
+    st.space("small")
     st.download_button(
-        "⬇️ Download the guide (Markdown)",
+        "Download The Guide",
         data=report.text.encode("utf-8"),
         file_name="nyc_travel_guide.md",
         mime="text/markdown",
+        icon=":material/download:",
     )
 
-    st.divider()
-    st.markdown("#### Ask a follow-up")
+    st.space("medium")
+    st.markdown(f"#### {material_icon('concierge', 18)} Ask A Follow-Up",
+                unsafe_allow_html=True)
     question = st.text_input(
-        "e.g. Which borough is best for a $150 budget with the best reviews?",
+        "Your question",
+        placeholder="e.g. Which borough is best for a $150 budget with the best reviews?",
         key="followup_question",
+        icon=":material/chat:",
     )
-    if st.button("Ask the concierge") and question.strip():
+    if st.button("Ask The Concierge", icon=":material/send:") and question.strip():
         try:
             with st.spinner("Thinking..."):
                 answer = llm.answer_followup(question, payload, provider=llm_provider)
@@ -1060,10 +2014,24 @@ def main() -> None:
     clean = nlp.attach_sentiment(clean, per_listing)
     top_reviewed = nlp.attach_sentiment(top_reviewed, per_listing)
 
+    # --- 3b. hover-photo URLs for the map --------------------------------
+    # Attached once here rather than inside the map tab so the same column is
+    # available to any future view; a failure is cosmetic (the tooltip simply
+    # shows no image), so it must never stop the app.
+    try:
+        top_reviewed = top_reviewed.assign(
+            picture_url=da.listing_photo_urls(top_reviewed)
+        )
+    except Exception as exc:
+        st.warning(f"Listing photos are unavailable ({exc}).",
+                   icon=":material/image_not_supported:")
+
     # --- 4. tabs ----------------------------------------------------------
-    map_tab, eda_tab, ai_tab = st.tabs(
-        ["🗺️ Interactive Map", "📊 EDA Insights", "🤖 AI Travel Guide"]
-    )
+    map_tab, eda_tab, ai_tab = st.tabs([
+        ":material/map: Map",
+        ":material/insights: EDA Insights",
+        ":material/smart_toy: AI Travel Guide",
+    ])
 
     filtered = pd.DataFrame()
     with map_tab:
@@ -1090,11 +2058,14 @@ def main() -> None:
             with st.expander("Traceback"):
                 st.code(traceback.format_exc())
 
-    st.divider()
-    st.caption(
-        "Built with Streamlit, pydeck, Plotly, VADER/TextBlob and an LLM API. "
+    st.space("large")
+    st.html(
+        "<div style='border-top:1px solid var(--border-color);padding-top:1rem;"
+        "font-size:.78rem;color:var(--text-color);opacity:.62;line-height:1.6'>"
+        "Built with Streamlit, PyDeck, Plotly, VADER/TextBlob and an LLM API. "
         "Data: Kaggle NYC Airbnb Open Data + Inside Airbnb reviews. "
-        "Geocoding: OpenStreetMap Nominatim."
+        "Geocoding: OpenStreetMap Nominatim. Photos: Unsplash. "
+        "Basemaps: Esri World Imagery, CARTO.</div>"
     )
 
 

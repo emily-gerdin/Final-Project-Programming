@@ -114,6 +114,37 @@ NYC_ZOOM: int = 10
 NYC_PITCH: int = 45          # deck.gl tilt
 NYC_BEARING: int = 0
 
+# Map presentation. ``MAP_BASEMAP_MODES`` is the single source of truth for the
+# basemap selectbox and ``MAP_DEFAULT_BASEMAP`` for its default, so the widget,
+# the deck style and the legend can never disagree about what "Satellite" means.
+MAP_BASEMAP_SATELLITE: str = "Satellite"
+MAP_BASEMAP_DARK: str = "Dark"
+MAP_BASEMAP_LIGHT: str = "Light"
+MAP_BASEMAP_MODES: tuple[str, ...] = (
+    MAP_BASEMAP_SATELLITE,
+    MAP_BASEMAP_DARK,
+    MAP_BASEMAP_LIGHT,
+)
+MAP_DEFAULT_BASEMAP: str = MAP_BASEMAP_SATELLITE
+
+# Satellite tiles are far brighter than a vector basemap, so the overlay colours
+# need a different treatment: a thin halo behind every marker (no marker --
+# coral or blue -- survives on photographic greens and beach greys without it),
+# a light heatmap (so the imagery is not washed out) and a faint dark scrim
+# under the tiles to keep the heatmap and tooltips legible.
+MAP_SATELLITE_HEATMAP_OPACITY: float = 0.38
+MAP_SATELLITE_HEATMAP_INTENSITY: float = 0.85
+MAP_VECTOR_HEATMAP_OPACITY: float = 0.65
+MAP_VECTOR_HEATMAP_INTENSITY: float = 1.10
+MAP_SATELLITE_SCRIM: tuple[float, ...] = (18, 16, 15, 38)   # RGBA, 0-255
+
+# Hover card: rendered as an HTML overlay inside the deck canvas, so the photo
+# is fetched from the Unsplash CDN as a ~12 KB thumbnail (w=) rather than the
+# original. Bigger thumbs would make hovering feel laggy on slow connections.
+MAP_TOOLTIP_PHOTO_WIDTH: int = 232
+MAP_TOOLTIP_PHOTO_HEIGHT: int = 140
+MAP_PHOTO_THUMB_QUERY: str = "?w=240&q=60&auto=format&fit=crop"
+
 # The five boroughs as they appear in ``neighbourhood_group``.
 BOROUGHS: tuple[str, ...] = (
     "Manhattan",
@@ -199,6 +230,63 @@ REGION_COLORS: dict[str, str] = {
     "Staten Island": "#54a24b",
     "Outer Boroughs": "#9d755d",
 }
+
+# --- UI palette (mirror of .streamlit/config.toml) ---------------------------
+# Streamlit's theme lives in TOML; the few places that need the same colours in
+# Python are the pydeck basemap style (below) and the inline Material icons.
+# Keep the two files in sync -- change both when the palette changes.
+UI_PALETTE: dict[str, str] = {
+    "primary": "#FF385C",          # Rausch coral accent
+    "primary_dark": "#C4123B",
+    "surface": "#FFFFFF",
+    "surface_muted": "#F6F3F1",
+    "ink": "#1B1A17",
+    "ink_muted": "#6B6560",
+    "border": "#E9E2DC",
+    "review_low": "#3D8BFF",       # cool = few reviews (map gradient)
+    "review_high": "#FF385C",      # warm = many reviews
+}
+
+# ---------------------------------------------------------------------------
+# 5. LISTING PHOTOS
+# ---------------------------------------------------------------------------
+# The Kaggle listings file ("AB_NYC_2019.csv") has NO photo column, so the
+# map's hover card needs a picture from somewhere. Rather than scraping
+# Airbnb (against their terms, breaks the app whenever they change the CDN),
+# we use a curated set of 20 real, permanently-hot-linkable Unsplash photos
+# (Unsplash licence: free commercial use, no attribution required) and assign
+# one to each listing deterministically from its id. Same listing -> same
+# photo on every rerun, and the distribution across the city looks natural.
+#
+# The raw photo is ~90 KB; ``?w=240&q=60`` makes the CDN serve a ~12 KB
+# thumbnail, which keeps hover previews instant on 6k markers.
+LISTING_PHOTOS: tuple[str, ...] = (
+    "photo-1522708323590-d24dbb6b0267",   # bright loft living room
+    "photo-1502672260266-1c1ef2d93688",   # soft grey bedroom wall
+    "photo-1560448204-e02f11c3d0e2",      # modern living room, city view
+    "photo-1560185127-6ed189bf02f4",      # living room + big windows
+    "photo-1522771739844-6a9f6d5f14af",   # cosy sofa and plants
+    "photo-1505693416388-ac5ce068fe85",   # warm bedroom
+    "photo-1616594039964-ae9021a400a0",   # white bedroom, oak floor
+    "photo-1598928506311-c55ded91a20c",   # terrace with skyline
+    "photo-1499793983690-e29da59ef1c2",   # bedroom, garden view
+    "photo-1540518614846-7eded433c457",   # duplex loft staircase
+    "photo-1512917774080-9991f1c4c750",   # house exterior, warm light
+    "photo-1580587771525-78b9dba3b914",   # modern house front
+    "photo-1502005229762-cf1b2da7c5d6",   # compact studio
+    "photo-1493809842364-78817add7ffb",   # living room, bookshelf
+    "photo-1484154218962-a197022b5858",   # kitchen island
+    "photo-1600585154340-be6161a56a0c",   # minimal bathroom/kitchen
+    "photo-1600607687939-ce8a6c25118c",   # bright modern interior
+    "photo-1600566753086-00f18fb6b3ea",   # bedroom with soft textiles
+    "photo-1567767292278-a4f21aa2d36e",   # exposed brick living room
+    "photo-1631049307264-da0ec9d70304",   # city hotel-condo interior
+)
+
+# Base URL of the Unsplash image CDN. Each id in ``LISTING_PHOTOS`` is a real
+# photo path there, so the full URL is simply ``PHOTO_CDN_BASE + id``.
+PHOTO_CDN_BASE: str = "https://images.unsplash.com/"
+
 
 # ---------------------------------------------------------------------------
 # 5. API KEYS

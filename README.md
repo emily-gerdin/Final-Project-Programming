@@ -1,4 +1,4 @@
-# 🗽 Top Reviewed NYC Travel Planner
+# Top Reviewed NYC Travel Planner
 
 An interactive Streamlit app that maps, scores and explains the **best-reviewed
 Airbnb stays across the five boroughs of New York City**.
@@ -25,9 +25,9 @@ methodology, results and lessons learned.
 
 | Tab | What you get |
 |---|---|
-| 🗺️ **Interactive Map** | pydeck map of 48k listings over the five boroughs with a heatmap layer, clustering, price/review sliders, borough and room-type filters, and geocoded area search |
-| 📊 **EDA Insights** | Raw-vs-cleaned data audit, IQR outlier report, price and review distributions, correlation matrix, sentiment by borough |
-| 🤖 **AI Travel Guide** | Sends the currently-filtered top-reviewed listings to an LLM (Gemini or OpenAI) which writes a natural-language travel guide. Falls back to a deterministic offline report when no key is configured |
+| **Interactive Map** | pydeck map of 48k listings over the five boroughs on a **satellite basemap**, with a heatmap layer, clustered markers, **hover cards showing each listing's photo**, price/review sliders, borough and room-type filters, and geocoded area search |
+| **EDA Insights** | Raw-vs-cleaned data audit, IQR outlier report, price and review distributions, correlation matrix, sentiment by borough |
+| **AI Travel Guide** | Sends the currently-filtered top-reviewed listings to an LLM (Gemini or OpenAI) which writes a natural-language travel guide. Falls back to a deterministic offline report when no key is configured |
 
 ---
 
@@ -104,7 +104,7 @@ OPENAI_API_KEY=sk-proj-...
 Optionally override the model with `GEMINI_MODEL` / `LLM_MODEL`. The default is
 `gemini-flash-lite-latest`.
 
-> ⚠️ **Never commit `.env`.** It is gitignored, along with `kaggle.json` and
+> **Never commit `.env`.** It is gitignored, along with `kaggle.json` and
 > `.streamlit/secrets.toml`. On Streamlit Cloud, paste the same names into the
 > app's **Secrets** panel instead.
 
@@ -134,7 +134,8 @@ are unavailable the synthetic fallback takes over.
 
 ```
 config.py             Central settings: paths, dataset ids, NYC geography,
-                      cleaning thresholds, secret resolution
+                      map basemap modes + hover-card sizing, cleaning
+                      thresholds, secret resolution
 data_acquisition.py   Phase 1 — Kaggle listings, Inside Airbnb reviews,
                       Nominatim geocoding, synthetic fallback
 eda.py                Phase 2 — cleaning, IQR outlier removal,
@@ -143,6 +144,8 @@ nlp_sentiment.py      Phase 3 — VADER / TextBlob scoring, per-listing
                       aggregation, keyword extraction
 llm_agent.py          Phase 3 — Gemini / OpenAI concierge, offline fallback
 app.py                Phase 4 — Streamlit UI: map, EDA and AI tabs
+.streamlit/config.toml  Theme: colours, Inter font, heading scale, radii,
+                      spacing, chart palette (light + dark)
 requirements.txt      Pinned dependencies
 ```
 
