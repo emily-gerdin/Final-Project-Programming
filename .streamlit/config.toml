@@ -1,0 +1,106 @@
+# =============================================================================
+# .streamlit/config.toml
+# -----------------------------------------------------------------------------
+# "Top Reviewed New York City Travel Planner" -- the design system.
+#
+# Everything Streamlit can theme natively lives here instead of in injected
+# CSS, so the look survives upgrades and applies to widgets that streamlit
+# renders in iframes-free shadow roots (sliders, toggles, tabs, dataframes...).
+#
+# Palette rationale
+# -----------------
+# The accent is Airbnb's "Rausch" coral (#FF385C): the product is an Airbnb
+# analytics tool, so the accent reads as "this is about Airbnb listings".
+# Neutrals stay slightly warm (never pure grey) so the coral does not look
+# pasted on. The dark theme is a near-black charcoal that lets the map and
+# the coral markers/heatmap carry the page.
+#
+# Colours are also mirrored in config.py (UI_PALETTE) for the few places that
+# need them in Python: the pydeck satellite style JSON and the inline icons.
+# Keep the two files in sync if the palette changes.
+# =============================================================================
+
+[theme]
+base = "light"
+
+# --- Brand ------------------------------------------------------------------
+primaryColor = "#FF385C"              # Rausch coral: buttons, sliders, toggles
+backgroundColor = "#FFFFFF"           # page canvas
+secondaryBackgroundColor = "#F6F3F1"  # widgets, code blocks, st.container(border=True)
+textColor = "#1B1A17"                 # warm near-black body text
+linkColor = "#C4123B"                 # darker coral so links pass contrast
+linkUnderline = false
+
+# --- Typography --------------------------------------------------------------
+# Inter is loaded from Google Fonts with a system fallback stack; no font files
+# to host and it degrades cleanly offline (the fallback stack renders instead).
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800&display=swap"
+baseFontSize = 15
+baseFontWeight = 400
+metricValueFontSize = "1.9rem"
+metricValueFontWeight = 700
+
+# --- Headings ----------------------------------------------------------------
+# h1-h4 are set (the app only paints h1 in the hero and h3/h4 as section
+# titles); h5/h6 keep Streamlit's defaults. Tighter sizes + heavier weights are
+# what separates a product from a default Streamlit page.
+headingFontSizes = ["2.6rem", "2rem", "1.45rem", "1.06rem"]
+headingFontWeights = [800, 750, 700, 650]
+
+# --- Spacing / chrome --------------------------------------------------------
+# One step larger than the default keeps cards and widgets from feeling cramped.
+baseRadius = "0.75rem"
+buttonRadius = "999px"               # pill buttons, same language as hero chips
+borderColor = "#E9E2DC"              # every native border (cards, widgets, dividers)
+paddingTop = "1.5rem"                # replaces the [data-testid=stMainBlockContainer] CSS
+paddingBottom = "2.5rem"
+showWidgetBorder = true
+showSidebarBorder = false             # the sidebar tint separates it already
+dataframeBorderColor = "#E9E2DC"
+dataframeHeaderBackgroundColor = "#F6F3F1"
+
+# --- Chart colour system ------------------------------------------------------
+# Categorical: the app's own chart colourway (mirrors eda.py / config.py).
+chartCategoricalColors = [
+    "#4C78A8", "#F58518", "#72B7B2", "#E45756", "#54A24B",
+    "#9D755D", "#B279A2", "#EECA3B", "#FF385C", "#8C8C8C",
+]
+# Sequential: blue -> coral, used for heatmaps and correlation matrices.
+chartSequentialColors = [
+    "#EAF1F8", "#CFE0F1", "#B3CFE9", "#96BDE1", "#7AABD9",
+    "#5D99D1", "#4187C9", "#2575C1", "#0A63B9", "#003B91",
+]
+chartDivergingColors = [
+    "#4C78A8", "#7A9DC4", "#A8C2DF", "#D5E2F0", "#F6F3F1",
+    "#F8D8CD", "#F4B0A6", "#EF887F", "#EA6058", "#FF385C",
+]
+
+[theme.sidebar]
+backgroundColor = "#FBF6F3"
+secondaryBackgroundColor = "#F4ECE7"
+
+# Only the keys Streamlit re-resolves per mode live in [theme.dark]; sizes such
+# as metricValueFontSize are shared and inherited from [theme] above.
+[theme.dark]
+primaryColor = "#FF5A76"
+backgroundColor = "#12100F"           # warm near-black, not blue-grey
+secondaryBackgroundColor = "#1D1A18"  # cards, expanders, inputs
+textColor = "#F4F0EC"
+linkColor = "#FF8FA3"
+borderColor = "#332E2A"
+dataframeBorderColor = "#332E2A"
+dataframeHeaderBackgroundColor = "#1D1A18"
+chartCategoricalColors = [
+    "#7FB2E5", "#F5A25D", "#8FD0CA", "#F08A8A", "#85C97C",
+    "#C29B86", "#D39BC3", "#F2D466", "#FF5A76", "#B3B3B3",
+]
+
+[theme.dark.sidebar]
+backgroundColor = "#171412"
+secondaryBackgroundColor = "#221E1B"
+
+[browser]
+# The tab title/description live in st.set_page_config; this sets the
+# favicon-free fallback gather interval so the app stays light on CPU.
+gatherUsageStats = false
