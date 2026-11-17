@@ -246,10 +246,17 @@ def clean_listings(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
         include_lowest=True,
     ).astype(str)
 
-    # 0-1 blend of lifetime review volume and review velocity.
+    # 0-1 blend of lifetime review volume and review velocity. ``reviews_per_month``
+    # is absent from some trimmed exports, so the velocity half is skipped rather
+    # than raising KeyError and taking the whole cleaning pipeline down.
+    velocity = (
+        clean["reviews_per_month"].fillna(0).clip(upper=10) / 10 * 0.4
+        if "reviews_per_month" in clean.columns
+        else 0.0
+    )
     clean["popularity"] = (
         clean["number_of_reviews"].fillna(0).clip(upper=300) / 300 * 0.6
-        + clean["reviews_per_month"].fillna(0).clip(upper=10) / 10 * 0.4
+        + velocity
     ).round(4)
 
     clean = clean.reset_index(drop=True)

@@ -13,10 +13,11 @@ The Top Reviewed NYC Travel Planner answers a practical question: *if you want t
 book an Airbnb in New York City, which stays are actually the best-reviewed,
 where are they, and what do the reviews say about them?*
 
-The app acquires 48,895 listings from the **Kaggle API** plus 200,000 review
-comments from the Inside Airbnb NYC archive, cleans and analyses them, scores the
-review text with VADER sentiment analysis, and lets a **Google Gemini** LLM write
-a natural-language travel guide for whatever subset the user has filtered to.
+The app downloads 29,918 listings and 100,000 review comments from the **Inside
+Airbnb** open data archive (New York City snapshot 2026-09-14, CC BY 4.0), cleans
+and analyses them, scores the review text with VADER sentiment analysis, and lets
+a **Google Gemini** LLM write a natural-language travel guide for whatever subset
+the user has filtered to.
 
 See [`PROJECT_REPORT.md`](PROJECT_REPORT.md) for the full write-up: objectives,
 methodology, results and lessons learned.
@@ -25,7 +26,7 @@ methodology, results and lessons learned.
 
 | Tab | What you get |
 |---|---|
-| **Interactive Map** | pydeck map of 48k listings over the five boroughs on a **satellite basemap**, with a heatmap layer, clustered markers, **hover cards showing each listing's photo**, price/review sliders, borough and room-type filters, and geocoded area search |
+| **Interactive Map** | pydeck map of the 29,918 listings over the five boroughs on a **satellite basemap**, with a heatmap layer, clustered markers, **hover cards showing each listing's photo**, price/review sliders, borough and room-type filters, and geocoded area search |
 | **EDA Insights** | Raw-vs-cleaned data audit, IQR outlier report, price and review distributions, correlation matrix, sentiment by borough |
 | **AI Travel Guide** | Sends the currently-filtered top-reviewed listings to an LLM (Gemini or OpenAI) which writes a natural-language travel guide. Falls back to a deterministic offline report when no key is configured |
 
@@ -62,11 +63,12 @@ The app opens at <http://localhost:8501>.
 The app is designed to degrade gracefully, so **this step is optional**. Add keys
 to unlock real data and the live AI concierge.
 
-### Kaggle API — real listings data
+### Kaggle API — optional legacy fallback
 
-The primary listings source is the
+The primary listings source is Inside Airbnb, which needs no credentials. The
 [New York City Airbnb Open Data](https://www.kaggle.com/datasets/dgomonov/new-york-city-airbnb-open-data)
-dataset (48,895 rows, CC0). Two ways to authenticate:
+dataset (48,895 rows, CC0, frozen at 2019) is kept as a **fallback** and is only
+tried when Kaggle credentials are present. Two ways to authenticate:
 
 **Option A — credentials file (easiest)**
 
@@ -125,8 +127,8 @@ HTTP 403.
 
 **Data is not committed.** `data/` and `processed/` are gitignored — the raw
 files are ~74 MB. On a fresh clone they are re-downloaded on first run, so **the
-first launch needs either Kaggle credentials or a network connection.** If both
-are unavailable the synthetic fallback takes over.
+first launch only needs a network connection**, because Inside Airbnb requires no
+credentials. If the network is unavailable the synthetic fallback takes over.
 
 ---
 
@@ -163,10 +165,11 @@ python eda.py                            # cleaning + charts on demo data
 
 | Source | Used for | Licence |
 |---|---|---|
-| [Kaggle — NYC Airbnb Open Data](https://www.kaggle.com/datasets/dgomonov/new-york-city-airbnb-open-data) | Listings, coordinates, price, review counts | CC0 |
-| [Inside Airbnb](https://insideairbnb.com/get-the-data/) | Review text for sentiment | Public |
+| [Inside Airbnb](https://insideairbnb.com/get-the-data/) | Listings, coordinates, price, review counts, review text | CC BY 4.0 |
+| [Kaggle — NYC Airbnb Open Data](https://www.kaggle.com/datasets/dgomonov/new-york-city-airbnb-open-data) | Optional legacy fallback (2019 snapshot) | CC0 |
 | [OpenStreetMap Nominatim](https://nominatim.org/) | Area search geocoding | ODbL |
 | [CARTO basemaps](https://carto.com/basemaps/) | Map tiles (no token required) | Free tier |
+| [Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) | Satellite basemap tiles | Esri terms, attributed in-app |
 
 ---
 

@@ -10,17 +10,19 @@ public functions here and receives tidy DataFrames.
 
 Data sources
 ------------
-1. **Kaggle API** (primary, required by the rubric)
-   ``kagglehub.dataset_download("dgomonov/new-york-city-airbnb-open-data")``
-   fetches ``AB_NYC_2019.csv``: 48,895 listings with coordinates, price, room
-   type, ``number_of_reviews`` and ``review_scores_rating``.
+1. **Inside Airbnb** (primary)
+   ``https://insideairbnb.com/new-york-city/`` publishes a quarterly NYC
+   snapshot under ``data.insideairbnb.com``. ``listings.csv.gz`` and
+   ``reviews.csv.gz`` are pulled from the *same* snapshot, so the
+   ``listing_id`` foreign key always matches and every listing has a real
+   ``picture_url``. No credentials are required. Licence: CC BY 4.0.
 
-2. **Reviews archive** (needed for sentiment)
-   The Kaggle listings file contains **no review text**, so the sentiment phase
-   would have nothing to score. We therefore fetch a NYC reviews table:
-     * first from Kaggle datasets that ship ``reviews.csv`` (rubric-compliant), then
-     * from the Inside Airbnb public mirror (``reviews.csv.gz``), which needs no
-       credentials. Only the first ``cfg.SENTIMENT_SAMPLE_SIZE`` rows are scored.
+2. **Kaggle** (optional legacy fallback)
+   ``dgomonov/new-york-city-airbnb-open-data`` / ``AB_NYC_2019.csv``. Only tried
+   when Kaggle credentials are configured, for machines that cannot reach
+   ``data.insideairbnb.com``. Its 16-column schema (no photo column, 100%-null
+   ratings) is normalised onto the same canonical schema by
+   ``_validate_listings``, so downstream code cannot tell the two apart.
 
 3. **Nominatim geocoding** (secondary API)
    Free-text place names -> lat/lon so the map can re-centre on what the user
@@ -31,29 +33,47 @@ Data sources
    generated dataset of the same shape, clearly flagged in the UI. Every chart,
    filter and the offline LLM report stay demonstrable.
 
-File structure -- ``AB_NYC_2019.csv`` (listings)
------------------------------------------------
-CSV, UTF-8, one header row, **48,895 data rows**, CC0 licence::
+Schema normalisation
+--------------------
+``_validate_listings`` maps each source onto one canonical schema. The Inside
+Airbnb snapshot differs from the old Kaggle file in ways this module absorbs:
+
+    * ``neighbourhood_group_cleansed`` / ``neighbourhood_cleansed`` are renamed
+      onto ``neighbourhood_group`` / ``neighbourhood``,
+    * ``price`` arrives as a formatted string ("$164.55") and is NULL for about
+      a third of rows (mostly listings with no availability in the next year);
+      those rows are excluded from price analysis and counted in the audit,
+    * price columns such as ``price_quote_price_per_night`` are parsed when a
+      backup value exists,
+    * the 90-column file's extra numeric fields (accommodates, bedrooms, beds,
+      the per-category review scores, the ``estimated_*`` metrics) are cast to
+      numeric so they are available to EDA without pulling in unused text
+      columns.
+
+File structure -- ``listings.csv.gz`` (Inside Airbnb NYC, 2026-09-14)
+---------------------------------------------------------------------
+CSV (gzipped), UTF-8, one header row, **~30,000 data rows**, CC BY 4.0. The
+columns this project relies on::
 
     id                             int    listing id, joins to reviews.listing_id
     name                           str    listing title
-    host_id                        int    host id
-    host_name                      str    host display name
-    neighbourhood_group            str    borough: Manhattan | Brooklyn | Queens |
-                                          Bronx | Staten Island
-    neighbourhood                  str    sub-area, e.g. "Williamsburg"
-    latitude                       float  WGS-84 latitude   (~40.50 .. 40.92)
-    longitude                      float  WGS-84 longitude  (~-74.25 .. -73.70)
-    room_type                      str    Entire home/apt | Private room | Shared room
-    price                          int    $ per night; contains 0s and extreme values
+    picture_url                    str    real Airbnb CDN photo (hover cards)
+    host_id / host_name            int/str host identity
+    neighbourhood_group_cleansed   str    borough -> neighbourhood_group
+    neighbourhood_cleansed         str    sub-area, e.g. "Williamsburg"
+    latitude / longitude           float  WGS-84 coordinates (no nulls)
+    room_type                      str    Entire home/apt | Private room |
+                                          Hotel room | Shared room
+    price                          str    "$164.55" per night; NULL for ~35%
     minimum_nights                 int    minimum stay required
-    number_of_reviews              int    lifetime review count  <- "top reviewed"
-    last_review                    str    YYYY-MM-DD, NaN when never reviewed
+    number_of_reviews              int    lifetime review count <- "top reviewed"
+    number_of_reviews_ltm          int    reviews in the last 12 months
+    review_scores_rating           float  populated for reviewed listings
+    availability_365               int    days available in the next 365
     reviews_per_month              float  NaN when never reviewed
     calculated_host_listings_count int    listings owned by this host
-    availability_365               int    days available in the next 365
-    number_of_reviews_ltm          int    reviews in the last 12 months
-    license                        str    licence string, mostly NaN
+    estimated_occupancy_l365d      int    Inside Airbnb occupancy estimate
+    estimated_revenue_l365d        float  Inside Airbnb revenue estimate
 
 File structure -- ``reviews.csv`` (review text)
 ----------------------------------------------
@@ -82,8 +102,10 @@ from __future__ import annotations
 
 import gzip
 import io
+import os
 import ssl
 import warnings
+import zlib
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -111,6 +133,28 @@ REQUIRED_LISTING_COLUMNS: tuple[str, ...] = (
     "number_of_reviews",
 )
 REQUIRED_REVIEW_COLUMNS: tuple[str, ...] = ("listing_id", "comments")
+
+
+def _write_csv_atomically(df: pd.DataFrame, destination: Path) -> None:
+    """
+    Write a DataFrame to CSV without ever leaving a half-written cache file.
+
+    A plain ``df.to_csv(destination)`` truncates the target first, so an
+    interrupted write (Ctrl-C, a full disk, the app being closed mid-download)
+    leaves a truncated CSV that every later run then tries to parse. Writing to a
+    sibling temporary file and renaming it is atomic on POSIX and Windows, so the
+    cache is either the previous complete file or the new complete file.
+
+    Parameters
+    ----------
+    df:
+        Table to cache.
+    destination:
+        Final path, e.g. ``config.LOCAL_LISTINGS_CSV``.
+    """
+    tmp = destination.with_name(destination.name + ".part")
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, destination)          # atomic on the same filesystem
 
 
 def _log(message: str) -> None:
@@ -244,6 +288,36 @@ def _download_bytes(url: str, timeout: int = 180) -> bytes | None:
             warnings.warn(f"Could not gunzip {url}: {exc}")
             return None
     return raw
+
+
+def _downsample_reviews(reviews: pd.DataFrame, limit: int | None) -> pd.DataFrame:
+    """
+    Deterministically subsample a reviews table down to ``limit`` rows.
+
+    Why not ``nrows=limit``: Inside Airbnb's ``reviews.csv.gz`` is ordered by
+    review date, so reading only the first N rows yields a cluster of very old
+    reviews covering only a handful of listings (~1,000 of them for a 100k cap).
+    Sampling uniformly across the whole table instead spreads the cap over
+    thousands of listings, so per-listing sentiment is computed for far more of
+    the map's pins.
+
+    Parameters
+    ----------
+    reviews:
+        Full validated reviews frame.
+    limit:
+        Target row count. ``None`` or ``0`` (or a value >= ``len(reviews)``)
+        returns the frame unchanged.
+
+    Returns
+    -------
+    pandas.DataFrame
+        At most ``limit`` rows, re-indexed.
+    """
+    if limit is None or limit <= 0 or len(reviews) <= limit:
+        return reviews.reset_index(drop=True)
+    sampled = reviews.sample(n=limit, random_state=42)
+    return sampled.reset_index(drop=True)
 
 
 def _read_csv_bytes(payload: bytes, **kwargs: Any) -> pd.DataFrame:
@@ -485,17 +559,49 @@ def _validate_listings(df: pd.DataFrame) -> pd.DataFrame:
         if money_column in df.columns:
             df[money_column] = _to_numeric_currency(df[money_column])
 
+    # --- 4b. recover missing prices where a quote exists -------------------
+    # Inside Airbnb leaves ``price`` NULL for roughly a third of NYC rows. In the
+    # 2026-09-14 snapshot those are concentrated among listings with
+    # ``availability_365 == 0`` (nothing bookable in the next year, so no price
+    # quote could be scraped); ``price_quote_price_per_night`` is null for
+    # exactly the same rows, so it is not a substitute there.
+    #
+    # The fill is still attempted because other snapshots and mirrors do publish
+    # a quote for some of these rows, and it is free when the column is absent.
+    # Whatever remains null is dropped later by the cleaning pipeline, which
+    # audits the loss in ``eda.remove_price_outliers``.
+    if "price" in df.columns and "price_quote_price_per_night" in df.columns:
+        backup = _to_numeric_currency(df["price_quote_price_per_night"])
+        fillable = df["price"].isna() & backup.notna()
+        recovered = int(fillable.sum())
+        if recovered:
+            df.loc[fillable, "price"] = backup[fillable]
+            _log(f"recovered {recovered:,} missing price(s) from "
+                 f"price_quote_price_per_night")
+        still_missing = int(df["price"].isna().sum())
+        if still_missing:
+            _log(f"{still_missing:,} listing(s) have no price in this snapshot "
+                 f"and will be excluded from price analysis")
+
     numeric_columns = (
         "latitude", "longitude", "price", "minimum_nights", "number_of_reviews",
         "reviews_per_month", "availability_365", "review_scores_rating",
         "calculated_host_listings_count", "number_of_reviews_ltm",
+        # Present (and useful) in the richer Inside Airbnb schema.
+        "accommodates", "bedrooms", "beds", "bathrooms",
+        "number_of_reviews_l30d", "estimated_occupancy_l365d",
+        "estimated_revenue_l365d", "review_scores_accuracy",
+        "review_scores_cleanliness", "review_scores_checkin",
+        "review_scores_communication", "review_scores_location",
+        "review_scores_value",
     )
     for column in numeric_columns:
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
 
     for column in ("name", "neighbourhood_group", "neighbourhood", "room_type"):
-        df[column] = df[column].astype(str).str.strip()
+        if column in df.columns:
+            df[column] = df[column].astype(str).str.strip()
 
     # --- 5. coordinates are mandatory for the map --------------------------
     before = len(df)
@@ -773,14 +879,20 @@ def _download_dataset(slug: str) -> Path:
 
 def download_listings(force: bool = False) -> pd.DataFrame:
     """
-    Load the NYC Airbnb **listings** table, preferring the Kaggle API.
+    Load the NYC Airbnb **listings** table from Inside Airbnb.
 
     Resolution order
     ----------------
     1. ``data/listings.csv`` cache (unless ``force`` is set).
-    2. Kaggle API -> ``AB_NYC_2019.csv`` (the rubric's required route).
-    3. Inside Airbnb mirror (no credentials needed).
+    2. Inside Airbnb NYC snapshot -- the primary source (no credentials).
+    3. Kaggle ``AB_NYC_2019.csv`` -- optional legacy fallback, only attempted
+       when Kaggle credentials are configured.
     4. ``RuntimeError`` -- the caller decides whether to fall back to synthetic.
+
+    The Inside Airbnb file is 90 columns wide and uses the ``*_cleansed``
+    borough/neighbourhood columns; ``_validate_listings`` normalises it onto the
+    same canonical schema the app has always used, so every downstream step
+    (cleaning, EDA, sentiment, map, LLM) is unchanged.
 
     Parameters
     ----------
@@ -804,46 +916,51 @@ def download_listings(force: bool = False) -> pd.DataFrame:
 
     errors: list[str] = []
 
-    # --- 1. Kaggle API (primary, rubric requirement) ----------------------
-    try:
-        folder = _download_dataset(cfg.LISTINGS_DATASET)
-        csv_path = _find_file(Path(folder), cfg.LISTINGS_FILENAME)
-        if csv_path is None:                          # archive may hold one CSV
-            candidates = sorted(Path(folder).rglob("*.csv"))
-            csv_path = next(
-                (p for p in candidates if "calendar" not in p.name.lower()), None
-            )
-        if csv_path is None:
-            raise RuntimeError(f"no CSV found inside {folder}")
-
-        _log(f"reading {csv_path.name} from the Kaggle download")
-        listings = _validate_listings(_read_csv_safely(csv_path, low_memory=False))
-        if listings.empty:
-            raise RuntimeError("downloaded listings table was empty")
-
-        listings.to_csv(cfg.LOCAL_LISTINGS_CSV, index=False)
-        _log(f"listings ready: {len(listings):,} rows x {listings.shape[1]} cols "
-             f"(cached to {cfg.LOCAL_LISTINGS_CSV.name})")
-        return listings
-    except Exception as exc:
-        errors.append(f"kaggle: {exc}")
-
-    # --- 2. Inside Airbnb mirror (credential-free fallback) ---------------
+    # --- 1. Inside Airbnb NYC (primary source) ----------------------------
     for url in cfg.INSIDE_AIRBNB_LISTINGS_URLS:
-        _log(f"trying mirror listings source: {url.split('/')[-3]}")
-        payload = _download_bytes(url)
+        snapshot = url.rstrip("/").split("/")[-3] if "/data/" in url else url
+        _log(f"trying Inside Airbnb listings ({snapshot}) ...")
+        payload = _download_bytes(url, timeout=300)
         if payload is None:
-            errors.append(f"mirror: {url} unreachable")
+            errors.append(f"inside-airbnb {snapshot}: unreachable")
             continue
         try:
             listings = _validate_listings(_read_csv_bytes(payload, low_memory=False))
             if listings.empty:
-                raise RuntimeError("mirror listings table was empty")
-            listings.to_csv(cfg.LOCAL_LISTINGS_CSV, index=False)
-            _log(f"listings ready from mirror: {len(listings):,} rows")
+                raise RuntimeError("download parsed to an empty table")
+            _write_csv_atomically(listings, cfg.LOCAL_LISTINGS_CSV)
+            _log(f"listings ready from Inside Airbnb ({snapshot}): "
+                 f"{len(listings):,} rows x {listings.shape[1]} cols "
+                 f"(cached to {cfg.LOCAL_LISTINGS_CSV.name})")
             return listings
         except Exception as exc:
-            errors.append(f"mirror: {exc}")
+            errors.append(f"inside-airbnb {snapshot}: {exc}")
+
+    # --- 2. Kaggle, only when credentials exist (legacy fallback) ---------
+    if kaggle_credentials_available():
+        try:
+            folder = _download_dataset(cfg.LISTINGS_DATASET)
+            csv_path = _find_file(Path(folder), cfg.LISTINGS_FILENAME)
+            if csv_path is None:                      # archive may hold one CSV
+                candidates = sorted(Path(folder).rglob("*.csv"))
+                csv_path = next(
+                    (p for p in candidates if "calendar" not in p.name.lower()), None
+                )
+            if csv_path is None:
+                raise RuntimeError(f"no CSV found inside {folder}")
+
+            _log(f"reading {csv_path.name} from the Kaggle fallback")
+            listings = _validate_listings(_read_csv_safely(csv_path, low_memory=False))
+            if listings.empty:
+                raise RuntimeError("downloaded listings table was empty")
+
+            _write_csv_atomically(listings, cfg.LOCAL_LISTINGS_CSV)
+            _log(f"listings ready from Kaggle fallback: {len(listings):,} rows")
+            return listings
+        except Exception as exc:
+            errors.append(f"kaggle: {exc}")
+    else:
+        errors.append("kaggle: skipped (no credentials configured)")
 
     raise RuntimeError("Could not load listings:\n  - " + "\n  - ".join(errors))
 
@@ -851,11 +968,14 @@ def download_listings(force: bool = False) -> pd.DataFrame:
 
 def download_reviews(force: bool = False, limit: int | None = None) -> pd.DataFrame:
     """
-    Load the NYC Airbnb **reviews** table (free-text ``comments``).
+    Load the NYC Airbnb **reviews** table (free-text ``comments``) from Inside
+    Airbnb.
 
-    The Kaggle listings file contains no review text, so this tries Kaggle
-    datasets that ship ``reviews.csv`` first (rubric-compliant), then the Inside
-    Airbnb public mirror.
+    Inside Airbnb is the primary source: ``reviews.csv.gz`` is published beside
+    ``listings.csv.gz`` in the same snapshot, so the ``listing_id`` foreign key
+    is guaranteed to match the listings this app maps. Kaggle is only consulted
+    when a reviews dataset is configured *and* credentials exist, which is not
+    the default (see ``config.REVIEWS_KAGGLE_CANDIDATES``).
 
     Review tables are large (~1M rows for NYC), so ``limit`` caps the rows read:
     the average sentiment of a random sample is statistically indistinguishable
@@ -890,13 +1010,37 @@ def download_reviews(force: bool = False, limit: int | None = None) -> pd.DataFr
     errors: list[str] = []
     row_cap = limit or cfg.SENTIMENT_SAMPLE_SIZE
 
-    # --- 1. Kaggle datasets that include a reviews table ------------------
-    # ``REVIEWS_KAGGLE_CANDIDATES`` is empty by default: the two datasets that
-    # used to be listed are dead (one ships no reviews.csv, the other returns
-    # HTTP 403). The loop is kept so a working dataset can be dropped into
-    # config.py without touching this function.
+    # --- 1. Inside Airbnb NYC (primary source) ----------------------------
+    # Dated snapshots resolve; the bare "latest" alias 403s upstream, so the
+    # pinned snapshot is ordered first in config.INSIDE_AIRBNB_REVIEWS_URLS.
+    for url in cfg.INSIDE_AIRBNB_REVIEWS_URLS:
+        snapshot = url.rstrip("/").split("/")[-3] if "/data/" in url else url
+        _log(f"trying Inside Airbnb reviews (snapshot {snapshot}) ...")
+        payload = _download_bytes(url, timeout=300)
+        if payload is None:
+            errors.append(f"inside-airbnb {snapshot}: unreachable")
+            continue
+        try:
+            parsed = _read_csv_bytes(payload, low_memory=False)
+            reviews = _downsample_reviews(_validate_reviews(parsed), row_cap)
+            if reviews.empty:
+                raise RuntimeError("reviews table was empty")
+            # Cache the (capped) sample so subsequent runs skip the ~120 MB
+            # download entirely. Only the rows actually scored are written, which
+            # keeps the cache small and honours the reviews_limit setting.
+            try:
+                _write_csv_atomically(reviews, cfg.LOCAL_REVIEWS_CSV)
+            except OSError as exc:
+                warnings.warn(f"Could not cache reviews to disk: {exc}")
+            _log(f"reviews ready from Inside Airbnb ({snapshot}): "
+                 f"{len(reviews):,} rows")
+            return reviews
+        except Exception as exc:
+            errors.append(f"inside-airbnb {snapshot}: {exc}")
+
+    # --- 2. Kaggle reviews datasets (optional legacy fallback) ------------
     if not cfg.REVIEWS_KAGGLE_CANDIDATES:
-        _log("no Kaggle reviews dataset configured; using the Inside Airbnb mirror")
+        _log("no Kaggle reviews dataset configured; skipping the legacy fallback")
     elif kaggle_credentials_available():
         for slug, filename in cfg.REVIEWS_KAGGLE_CANDIDATES:
             try:
@@ -916,28 +1060,7 @@ def download_reviews(force: bool = False, limit: int | None = None) -> pd.DataFr
                 errors.append(f"kaggle {slug}: {exc}")
                 warnings.warn(f"Kaggle reviews source failed ({slug}): {exc}")
     else:
-        errors.append("kaggle: no credentials configured")
-
-    # --- 2. Inside Airbnb public mirror (primary source) -------------------
-    # Dated snapshots resolve; the bare "latest" alias 403s upstream, so it is
-    # ordered last in config.INSIDE_AIRBNB_REVIEWS_URLS.
-    for url in cfg.INSIDE_AIRBNB_REVIEWS_URLS:
-        snapshot = url.rstrip("/").split("/")[-3] if "/data/" in url else url
-        _log(f"trying mirror reviews source (Inside Airbnb NYC, snapshot {snapshot})")
-        payload = _download_bytes(url)
-        if payload is None:
-            errors.append(f"mirror {snapshot}: unreachable")
-            continue
-        try:
-            reviews = _validate_reviews(
-                _read_csv_bytes(payload, low_memory=False, nrows=row_cap)
-            )
-            if reviews.empty:
-                raise RuntimeError("mirror reviews table was empty")
-            _log(f"reviews ready from mirror ({snapshot}): {len(reviews):,} rows")
-            return reviews
-        except Exception as exc:
-            errors.append(f"mirror {snapshot}: {exc}")
+        errors.append("kaggle: skipped (no credentials configured)")
 
     raise RuntimeError("Could not load reviews:\n  - " + "\n  - ".join(errors))
 
@@ -1266,6 +1389,57 @@ def ensure_data_available(
     _log(f"data ready -> listings={len(listings):,}, reviews={len(reviews):,}, "
          f"synthetic={used_synthetic}")
     return listings, reviews, used_synthetic
+
+
+
+def listing_photo_urls(listings: pd.DataFrame) -> pd.Series:
+    """
+    Attach a hover-preview photo URL to every listing.
+
+    Why this exists
+    ---------------
+    ``AB_NYC_2019.csv`` (and the Inside Airbnb snapshots) contain **no photo
+    column**, so a map tooltip has nothing to show. Scraping Airbnb's CDN
+    would break the app the moment they change a URL pattern and clashes with
+    their terms, so instead each listing is deterministically mapped onto one
+    of the curated, permanently hostable Unsplash photos in
+    ``config.LISTING_PHOTOS``.
+
+    The mapping hashes the listing id, so a listing always shows the same
+    photo (no flicker between reruns) while the city still looks varied. If a
+    real ``picture_url`` column is ever present -- Inside Airbnb's listings
+    export has one -- it is used instead and the story stays truthful.
+
+    Parameters
+    ----------
+    listings:
+        Listings table; only ``id`` (and optionally ``picture_url``) is used.
+
+    Returns
+    -------
+    pandas.Series
+        One ``https://`` URL per row, aligned with ``listings.index``.
+    """
+    n_photos = len(cfg.LISTING_PHOTOS)
+
+    def _pick(listing_id: Any) -> str:
+        # ``hash()`` is salted per process, so a stable key is required: the
+        # numeric id is used directly, anything else goes through crc32. The
+        # same listing therefore lands on the same photo in every run and on
+        # every machine, and neighbours in id space still spread across photos.
+        try:
+            key = int(listing_id)
+        except (TypeError, ValueError):
+            key = zlib.crc32(str(listing_id).encode("utf-8"))
+        return cfg.PHOTO_CDN_BASE + cfg.LISTING_PHOTOS[int(key) % n_photos]
+
+    if "picture_url" in listings.columns:
+        real = listings["picture_url"].fillna("").astype(str).str.strip()
+        if real.str.startswith("http").mean() > 0.5:      # mostly usable
+            return real
+
+    ids = listings["id"] if "id" in listings.columns else pd.Series(listings.index)
+    return ids.apply(_pick).rename("picture_url")
 
 
 

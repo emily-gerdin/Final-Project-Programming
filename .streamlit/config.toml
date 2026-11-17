@@ -1,19 +1,27 @@
 # =============================================================================
 # .streamlit/config.toml
 # -----------------------------------------------------------------------------
-# "Top Reviewed New York City Travel Planner" -- the design system.
+# "The Top Reviewed NYC Airbnb Travel Guide" -- the design system.
 #
 # Everything Streamlit can theme natively lives here instead of in injected
 # CSS, so the look survives upgrades and applies to widgets that streamlit
 # renders in iframes-free shadow roots (sliders, toggles, tabs, dataframes...).
 #
-# Palette rationale
-# -----------------
-# The accent is Airbnb's "Rausch" coral (#FF385C): the product is an Airbnb
-# analytics tool, so the accent reads as "this is about Airbnb listings".
-# Neutrals stay slightly warm (never pure grey) so the coral does not look
-# pasted on. The dark theme is a near-black charcoal that lets the map and
-# the coral markers/heatmap carry the page.
+# Aesthetic: high-end editorial magazine, dark only
+# -------------------------------------------------
+# * Near-black canvas (#0A0A0A), off-white display type (#F5F5F5), muted grey
+#   body copy (#A0A0A0) -- the palette of a printed art book, not a dashboard.
+# * Bodoni Moda (a Didone, the same family of typefaces as Vogue/Harper's
+#   Bazaar) carries every heading; Montserrat at weight 300, letter-spaced,
+#   carries body copy, labels and buttons.
+# * Hairline rules (rgba(255,255,255,0.16)) instead of filled surfaces, square
+#   corners, and generous vertical rhythm -- the "cinematic and spacious" feel
+#   comes from whitespace, not from decoration.
+#
+# The theme is pinned to dark (``base = "dark"``) because the identity *is* the
+# dark canvas; the settings menu therefore cannot flip the app to a washed-out
+# light mode. There is no ``[theme.dark]``/``[theme.light]`` override block for
+# the same reason: every token below applies unconditionally.
 #
 # Colours are also mirrored in config.py (UI_PALETTE) for the few places that
 # need them in Python: the pydeck satellite style JSON and the inline icons.
@@ -21,84 +29,74 @@
 # =============================================================================
 
 [theme]
-base = "light"
+base = "dark"
 
 # --- Brand ------------------------------------------------------------------
-primaryColor = "#FF385C"              # Rausch coral: buttons, sliders, toggles
-backgroundColor = "#FFFFFF"           # page canvas
-secondaryBackgroundColor = "#F6F3F1"  # widgets, code blocks, st.container(border=True)
-textColor = "#1B1A17"                 # warm near-black body text
-linkColor = "#C4123B"                 # darker coral so links pass contrast
-linkUnderline = false
+# No chromatic accent: on an editorial page the *type* is the accent, and a
+# neutral off-white keeps sliders, toggles and tab underlines reading as
+# hairline detail rather than as UI chrome.
+primaryColor = "#F5F5F5"              # controls, slider thumbs, active tab rule
+backgroundColor = "#0A0A0A"           # near-black page canvas
+secondaryBackgroundColor = "#121212"  # inputs, code blocks, bordered containers
+textColor = "#F5F5F5"                 # headings and lead copy
+linkColor = "#F5F5F5"
+linkUnderline = true
 
 # --- Typography --------------------------------------------------------------
-# Inter is loaded from Google Fonts with a system fallback stack; no font files
-# to host and it degrades cleanly offline (the fallback stack renders instead).
-font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800&display=swap"
+# Both families are named here too, so native widgets rendered by Streamlit's
+# own components pick up the same character. The authoritative @font-face rules
+# live in app.py (_EDITORIAL_CSS), which declares one latin face per weight --
+# Bodoni 400, Bodoni italic 500, Montserrat 300/400 -- under the app's own
+# family names. That is deliberate: it keeps the display serif independent of
+# whatever face set the theme URLs generate.
+# Offline, the stacks fall back to Didot / Bodoni 72 (macOS) or Georgia.
+headingFont = "Bodoni Moda:https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,wght@0,400;0,500;0,700;1,400;1,500&display=swap"
+font = "Montserrat:https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500&display=swap"
 baseFontSize = 15
-baseFontWeight = 400
-metricValueFontSize = "1.9rem"
-metricValueFontWeight = 700
+baseFontWeight = 300                  # thin body weight, echoed with spacing in app.py
+metricValueFontSize = "2rem"
+metricValueFontWeight = 400           # the metric number is a display serif
 
 # --- Headings ----------------------------------------------------------------
-# h1-h4 are set (the app only paints h1 in the hero and h3/h4 as section
-# titles); h5/h6 keep Streamlit's defaults. Tighter sizes + heavier weights are
-# what separates a product from a default Streamlit page.
-headingFontSizes = ["2.6rem", "2rem", "1.45rem", "1.06rem"]
-headingFontWeights = [800, 750, 700, 650]
+# Normal/light display weights: a Didone derives its drama from stroke contrast,
+# not from weight, so bold would make it shout. h1 is the hero title; it is
+# tight-leaded (0.95), left-aligned and uppercased in app.py.
+headingFontSizes = ["3rem", "2.1rem", "1.45rem", "1.05rem"]
+headingFontWeights = [400, 400, 400, 400]
 
 # --- Spacing / chrome --------------------------------------------------------
-# One step larger than the default keeps cards and widgets from feeling cramped.
-baseRadius = "0.75rem"
-buttonRadius = "999px"               # pill buttons, same language as hero chips
-borderColor = "#E9E2DC"              # every native border (cards, widgets, dividers)
-paddingTop = "1.5rem"                # replaces the [data-testid=stMainBlockContainer] CSS
-paddingBottom = "2.5rem"
+# Square corners everywhere: rounded cards read as "app", not "magazine".
+baseRadius = "0"
+buttonRadius = "0"
+borderColor = "#2A2A2A"              # native borders (inputs, dividers, containers)
 showWidgetBorder = true
-showSidebarBorder = false             # the sidebar tint separates it already
-dataframeBorderColor = "#E9E2DC"
-dataframeHeaderBackgroundColor = "#F6F3F1"
+showSidebarBorder = true
+dataframeBorderColor = "#2A2A2A"
+dataframeHeaderBackgroundColor = "#121212"
 
 # --- Chart colour system ------------------------------------------------------
-# Categorical: the app's own chart colourway (mirrors eda.py / config.py).
+# Charts follow the editorial palette: an ink-to-paper sequential scale (blacks
+# through warm greys to off-white) for heatmaps and the correlation matrix, and
+# a low-saturation categorical set whose only chromatic notes are a dusty slate
+# and a muted brass -- they read as "printed", not "dashboard".
 chartCategoricalColors = [
-    "#4C78A8", "#F58518", "#72B7B2", "#E45756", "#54A24B",
-    "#9D755D", "#B279A2", "#EECA3B", "#FF385C", "#8C8C8C",
+    "#F5F5F5", "#D9D9D9", "#B0B0B0", "#8A8A8A", "#C9B79C",
+    "#7F8C8D", "#A0A0A0", "#6E6E6E", "#4A4A4A", "#E8DCCB",
 ]
-# Sequential: blue -> coral, used for heatmaps and correlation matrices.
+# Sequential: near-black -> off-white, matching the review-count gradient on
+# the map legend (--review-low / --review-high in app.py).
 chartSequentialColors = [
-    "#EAF1F8", "#CFE0F1", "#B3CFE9", "#96BDE1", "#7AABD9",
-    "#5D99D1", "#4187C9", "#2575C1", "#0A63B9", "#003B91",
+    "#0A0A0A", "#1C1C1C", "#2E2E2E", "#414141", "#545454",
+    "#676767", "#7A7A7A", "#8D8D8D", "#A0A0A0", "#F5F5F5",
 ]
 chartDivergingColors = [
-    "#4C78A8", "#7A9DC4", "#A8C2DF", "#D5E2F0", "#F6F3F1",
-    "#F8D8CD", "#F4B0A6", "#EF887F", "#EA6058", "#FF385C",
+    "#7F8C8D", "#6A7373", "#555B5B", "#3F4343", "#2A2A2A",
+    "#3A3A3A", "#5C5449", "#7D7263", "#A0906F", "#C9B79C",
 ]
 
 [theme.sidebar]
-backgroundColor = "#FBF6F3"
-secondaryBackgroundColor = "#F4ECE7"
-
-# Only the keys Streamlit re-resolves per mode live in [theme.dark]; sizes such
-# as metricValueFontSize are shared and inherited from [theme] above.
-[theme.dark]
-primaryColor = "#FF5A76"
-backgroundColor = "#12100F"           # warm near-black, not blue-grey
-secondaryBackgroundColor = "#1D1A18"  # cards, expanders, inputs
-textColor = "#F4F0EC"
-linkColor = "#FF8FA3"
-borderColor = "#332E2A"
-dataframeBorderColor = "#332E2A"
-dataframeHeaderBackgroundColor = "#1D1A18"
-chartCategoricalColors = [
-    "#7FB2E5", "#F5A25D", "#8FD0CA", "#F08A8A", "#85C97C",
-    "#C29B86", "#D39BC3", "#F2D466", "#FF5A76", "#B3B3B3",
-]
-
-[theme.dark.sidebar]
-backgroundColor = "#171412"
-secondaryBackgroundColor = "#221E1B"
+backgroundColor = "#0A0A0A"           # sidebar is the same paper as the page
+secondaryBackgroundColor = "#121212"
 
 [browser]
 # The tab title/description live in st.set_page_config; this sets the

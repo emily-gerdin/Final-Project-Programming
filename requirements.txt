@@ -22,8 +22,12 @@ plotly>=5.18.0           # EDA charts + correlation matrix
 statsmodels>=0.14.0      # OLS trend line in the reviews-vs-price scatter plot
 
 # --- Data acquisition ---------------------------------------------------------
-kagglehub>=0.2.0         # modern Kaggle API downloader (routes through Kaggle)
-kaggle>=1.6.0            # classic Kaggle API client (used as a fallback)
+# PRIMARY source is Inside Airbnb (insideairbnb.com), fetched over plain HTTPS
+# with the standard library -- no extra packages and no credentials required.
+# The Kaggle clients below are only used by the optional legacy fallback, so
+# they can be dropped entirely if you never intend to use it.
+kagglehub>=0.2.0         # OPTIONAL: legacy Kaggle fallback downloader
+kaggle>=1.6.0            # OPTIONAL: classic Kaggle API client (fallback; not needed for Inside Airbnb)
 geopy>=2.4.0             # Nominatim geocoding (map search box)
 
 # --- NLP sentiment analysis (local, no API key required) ----------------------
@@ -35,5 +39,5 @@ openai>=1.10.0           # OpenAI Chat Completions client
 google-generativeai>=0.3.2  # Google Gemini client (alternative provider)
 
 # --- Documentation / build tooling -------------------------------------------
-reportlab>=4.0.0         # renders the step-by-step guide PDF
+reportlab>=4.0.0         # OPTIONAL: make_slides.py builds the presentation PDF
 Pillow>=10.0.0           # image prep for the hero banner

@@ -60,50 +60,71 @@ LISTING_SENTIMENT_CSV: Path = PROCESSED_DIR / "listing_sentiment.csv"
 # ---------------------------------------------------------------------------
 # 2. DATA SOURCE IDENTIFIERS
 # ---------------------------------------------------------------------------
-# LISTINGS -- "New York City Airbnb Open Data" (AB_NYC_2019.csv, 48,895 rows,
-# CC0). Coordinates, price, room type, number_of_reviews and review_scores_*
-# are all present, which is exactly what the rubric asks for.
+# PRIMARY SOURCE -- Inside Airbnb, New York City.
 #
-#   https://www.kaggle.com/datasets/dgomonov/new-york-city-airbnb-open-data
+#   https://insideairbnb.com/new-york-city/
+#   https://insideairbnb.com/get-the-data/
 #
+# Inside Airbnb publishes one folder per city per quarterly snapshot. The URL
+# shape is
+#   https://data.insideairbnb.com/united-states/ny/new-york-city/<date>/data/<file>
+#
+# Why this replaced the Kaggle "New York City Airbnb Open Data" (AB_NYC_2019.csv)
+# snapshot:
+#   * it is current (the Kaggle file is frozen at 2019),
+#   * it ships the real ``picture_url`` column, so the map hover cards show the
+#     actual listing photo instead of a stand-in Unsplash image,
+#   * ``review_scores_rating`` is actually populated (the Kaggle file ships the
+#     column 100% null),
+#   * listings and reviews come from one consistent snapshot, so ``listing_id``
+#     joins are exact by construction rather than by luck,
+#   * it needs no credentials at all.
+#
+# Schema notes handled in ``data_acquisition._validate_listings``:
+#   * the borough/neighbourhood columns are the ``*_cleansed`` variants
+#     (``neighbourhood_group_cleansed`` / ``neighbourhood_cleansed``),
+#   * ``price`` is a formatted string ("$164.55") and is NULL for roughly a third
+#     of rows; ``price_quote_price_per_night`` is used as a backup before a row
+#     is discarded,
+#   * there are 90 columns rather than the Kaggle file's 16, including several
+#     ``estimated_*`` metrics that this app does not use.
+#
+# Data is CC BY 4.0: Inside Airbnb must be credited wherever the data is shown
+# (see ``INSIDE_AIRBNB_ATTRIBUTION`` and the app footer).
+INSIDE_AIRBNB_CITY_PATH: str = "united-states/ny/new-york-city"
+INSIDE_AIRBNB_SNAPSHOT: str = "2026-09-14"
+INSIDE_AIRBNB_LICENSE: str = "CC BY 4.0"
+INSIDE_AIRBNB_ATTRIBUTION: str = (
+    "Data: Inside Airbnb (insideairbnb.com), CC BY 4.0"
+)
+
+# Dated snapshots resolve; the bare "latest" alias currently returns HTTP 403
+# from Inside Airbnb's CDN, so the pinned snapshot is tried first and "latest"
+# is kept last as a self-healing fallback if they unblock it.
+INSIDE_AIRBNB_LISTINGS_URLS: tuple[str, ...] = (
+    f"https://data.insideairbnb.com/{INSIDE_AIRBNB_CITY_PATH}/{INSIDE_AIRBNB_SNAPSHOT}/data/listings.csv.gz",
+    f"https://data.insideairbnb.com/{INSIDE_AIRBNB_CITY_PATH}/latest/data/listings.csv.gz",
+)
+INSIDE_AIRBNB_REVIEWS_URLS: tuple[str, ...] = (
+    f"https://data.insideairbnb.com/{INSIDE_AIRBNB_CITY_PATH}/{INSIDE_AIRBNB_SNAPSHOT}/data/reviews.csv.gz",
+    f"https://data.insideairbnb.com/{INSIDE_AIRBNB_CITY_PATH}/latest/data/reviews.csv.gz",
+)
+
+# OPTIONAL FALLBACK -- the original Kaggle dataset.
+#
+# Kept only as a last-resort mirror for machines that cannot reach
+# data.insideairbnb.com. It is never tried unless Kaggle credentials are
+# configured, and the app runs perfectly without them. Its schema is the old
+# 16-column one (no photo column, empty ratings), which the same validator
+# normalises onto the canonical schema.
 LISTINGS_DATASET: str = "dgomonov/new-york-city-airbnb-open-data"
 LISTINGS_FILENAME: str = "AB_NYC_2019.csv"
 LISTINGS_LICENSE: str = "CC0: Public Domain"
 
-# REVIEWS -- the Kaggle listings file above contains NO review text, so the
-# sentiment phase would have nothing to score. The Inside Airbnb NYC review
-# archive is the upstream source the Kaggle listings file derives from, so its
-# listing ids join cleanly against AB_NYC_2019.csv.
-#
-# The mirror is the PRIMARY path. It needs no credentials, so reviews work on a
-# fresh clone with no Kaggle key configured.
-#
-# Note on the Kaggle route: it is kept first in code order for rubric
-# compliance, but both previously-configured candidates are dead and will fail
-# fast (see the warnings in the app log):
-#   * arianazmoudeh/airbnbopendata      -> archive ships no reviews.csv
-#   * julianbenavides/airbnb-nyc-reviews -> HTTP 403 (access revoked/private)
-# They are left behind REVIEWS_KAGGLE_CANDIDATES = () below; population is
-# optional and only attempted when the list is non-empty.
+# Kaggle datasets that ship a reviews table. Empty by default: the previously
+# configured candidates are dead (one ships no reviews.csv, the other 403s), and
+# Inside Airbnb is now the primary source anyway.
 REVIEWS_KAGGLE_CANDIDATES: tuple[tuple[str, str], ...] = ()
-
-# Inside Airbnb publishes one folder per city per snapshot date. The URL shape is
-#   https://data.insideairbnb.com/united-states/ny/new-york-city/<date>/data/reviews.csv.gz
-#
-# IMPORTANT: the "latest" alias currently returns HTTP 403 Forbidden (checked
-# 2026-11-07). Inside Airbnb blocks the bare alias but serves dated snapshots,
-# so the dated URL is listed FIRST and is the one that actually resolves. The
-# "latest" entry is retained last so the code self-heals if the alias is
-# unblocked upstream.
-INSIDE_AIRBNB_REVIEWS_URLS: tuple[str, ...] = (
-    "https://data.insideairbnb.com/united-states/ny/new-york-city/2026-09-14/data/reviews.csv.gz",
-    "https://data.insideairbnb.com/united-states/ny/new-york-city/latest/data/reviews.csv.gz",
-)
-# Fallback listings mirror (used only if the Kaggle listings download fails).
-INSIDE_AIRBNB_LISTINGS_URLS: tuple[str, ...] = (
-    "https://data.insideairbnb.com/united-states/ny/new-york-city/2026-09-14/data/listings.csv.gz",
-    "https://data.insideairbnb.com/united-states/ny/new-york-city/latest/data/listings.csv.gz",
-)
 
 # ---------------------------------------------------------------------------
 # 3. NYC GEOGRAPHY
@@ -222,13 +243,16 @@ MIN_REVIEWS_FOR_SENTIMENT: int = 1     # need >=1 scored review per listing
 SENTIMENT_SAMPLE_SIZE: int = 200_000   # reviews scored per run (speed/size trade-off)
 
 # --- Chart palette shared by Plotly figures and the app ----------------------
+# Monochrome-adjacent: a platinum ink ramp for the boroughs, so the charts sit
+# inside the editorial palette (off-white -> charcoal) instead of clashing with
+# it. Mirrors ``chartCategoricalColors`` in .streamlit/config.toml.
 REGION_COLORS: dict[str, str] = {
-    "Manhattan": "#4c78a8",
-    "Brooklyn": "#f58518",
-    "Queens": "#72b7b2",
-    "Bronx": "#e45756",
-    "Staten Island": "#54a24b",
-    "Outer Boroughs": "#9d755d",
+    "Manhattan": "#F5F5F5",
+    "Brooklyn": "#D9D9D9",
+    "Queens": "#B0B0B0",
+    "Bronx": "#8A8A8A",
+    "Staten Island": "#C9B79C",
+    "Outer Boroughs": "#6A6A6A",
 }
 
 # --- UI palette (mirror of .streamlit/config.toml) ---------------------------
@@ -236,15 +260,15 @@ REGION_COLORS: dict[str, str] = {
 # Python are the pydeck basemap style (below) and the inline Material icons.
 # Keep the two files in sync -- change both when the palette changes.
 UI_PALETTE: dict[str, str] = {
-    "primary": "#FF385C",          # Rausch coral accent
-    "primary_dark": "#C4123B",
-    "surface": "#FFFFFF",
-    "surface_muted": "#F6F3F1",
-    "ink": "#1B1A17",
-    "ink_muted": "#6B6560",
-    "border": "#E9E2DC",
-    "review_low": "#3D8BFF",       # cool = few reviews (map gradient)
-    "review_high": "#FF385C",      # warm = many reviews
+    "primary": "#F5F5F5",          # off-white: the only "accent" on paper-black
+    "primary_dark": "#A0A0A0",
+    "surface": "#0A0A0A",          # near-black canvas
+    "surface_muted": "#121212",    # inputs, bordered containers
+    "ink": "#F5F5F5",              # display + heading text
+    "ink_muted": "#A0A0A0",        # body copy
+    "border": "#2A2A2A",           # hairlines
+    "review_low": "#3A3A3A",       # charcoal = few reviews (map gradient)
+    "review_high": "#F5F5F5",      # off-white = many reviews
 }
 
 # ---------------------------------------------------------------------------
@@ -373,7 +397,9 @@ GEMINI_MODEL: str = get_secret("GEMINI_MODEL", "gemini-flash-lite-latest") or "g
 # ---------------------------------------------------------------------------
 # BRANDING
 # ---------------------------------------------------------------------------
-APP_TITLE: str = "Top Reviewed NYC Travel Planner"
+APP_TITLE: str = "THE TOP REVIEWED NYC AIRBNB TRAVEL GUIDE"
+# Kept in its original sentence case: the hero sets only the *headline* in
+# caps, and the serif standfirst is meant to read as editorial copy under it.
 APP_SUBTITLE: str = (
     "The best-reviewed Airbnb stays across the five boroughs - mapped, scored "
     "and explained by an AI concierge."

@@ -13,7 +13,7 @@ Run it with::
 Layout
 ------
 Sidebar
-    Data source controls (Kaggle download / synthetic demo), NLP engine choice
+    Data source controls (Inside Airbnb download / synthetic demo), NLP engine
     and the LLM provider for the AI concierge.
 Tab 1 - Interactive Map
     pydeck map of NYC centred on (40.7128, -74.0060) with:
@@ -21,8 +21,8 @@ Tab 1 - Interactive Map
       * a **satellite basemap by default** (Esri World Imagery, key-free),
         switchable to the light/dark Carto vector styles,
       * a **HeatmapLayer** showing where highly-reviewed rentals cluster,
-      * **marker clustering** (``ColumnLayer``) with a white halo so the columns
-        stay legible on photographic imagery,
+      * **black map pins** (rasterised PNG ``IconLayer`` markers) whose tip marks
+        each listing's exact location, with a white halo on satellite imagery,
       * a **hover card per listing** with a **photo preview**, name, price,
         rating, review count, neighbourhood, room type and sentiment -- shown
         on hover, not click (deck.gl tooltip)
@@ -42,19 +42,38 @@ Tab 3 - AI Travel Guide
 
 Design system
 -------------
-The visual identity lives in ``.streamlit/config.toml`` (colours, Inter font,
-radii, metric styling, chart palette) so every native widget is themed without
-per-widget CSS. This file only adds what config.toml cannot express:
+The visual identity is a **dark editorial magazine**: near-black canvas,
+Bodoni Moda display type, hairline rules, square corners, wide-tracked
+uppercase labels. It is declared in two layers:
 
-* layout tweaks written against Streamlit's own CSS variables
-  (``var(--primary-color)``, ``var(--border-color)``...), so they follow the
-  theme instead of hard-coding colours;
-* the hero banner, which is presentation of the title rather than a widget;
-* equal-height card rows, achieved with CSS subgrid over ``st.columns``.
+1. ``.streamlit/config.toml`` -- everything Streamlit can theme natively
+   (colours, the Bodoni/Montserrat font URLs, square radii, heading weights,
+   chart palettes), so no widget has to be restyled by hand.
+2. ``_EDITORIAL_CSS`` below -- what a theme key cannot express: the @font-face
+   declarations, the hero, the uppercase section headings, the outlined
+   buttons, tab underlines, form controls and the cinematic spacing. It reads
+   Streamlit's CSS variables (``var(--text-color)``...) plus a handful of page
+   tokens (``--editorial-*``) declared on ``:root``, so changing a value is a
+   one-line edit.
 
-Icons come from Material: widgets use Streamlit's native ``icon=`` /
-``:material/...:`` syntax, and markdown headings use the matching inline SVG
-from ``_MATERIAL_ICONS`` (same glyph, nothing to download).
+The stylesheet is injected with ``st.markdown(..., unsafe_allow_html=True)``
+(the classic route) as well as ``st.html``; ``_COMPONENT_CSS`` adds the card
+grids and listing cards. Two details in it are not cosmetic:
+
+* fonts are declared under the app's own family names (``Editorial Serif`` /
+  ``Editorial Sans``) so the display serif cannot be lost to whatever faces
+  Streamlit generates from the theme's Google Fonts URLs;
+* Streamlit wraps markdown headings in
+  ``<div data-testid="stHeadingWithActionElements"><h1><span>``, so the type
+  is re-asserted on that inner span, and every ``:material/...:`` icon span is
+  pinned to the Material Symbols font -- otherwise ligature names print as
+  words ("smart_toy") and icon rows collide with their labels.
+
+Streamlit's published variables are inherited from the theme; the wrappers the
+rules target -- ``stMainBlockContainer``, ``stLayoutWrapper`` and the
+``.stColumn`` / ``.stVerticalBlock`` classes -- are the DOM structure Streamlit
+1.6x emits; the rules are written so that if a future release renames them the
+page simply loses the polish instead of breaking.
 
 Architecture notes
 ------------------
@@ -75,13 +94,18 @@ layer plugs in.
 
 from __future__ import annotations
 
+import base64
 import html
+import io
+import json
+import math
 import traceback
 from typing import Any
 
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
+from PIL import Image, ImageDraw
 
 import config as cfg
 import data_acquisition as da
@@ -93,7 +117,7 @@ import nlp_sentiment as nlp
 # PAGE CONFIG -- must be the first Streamlit call in the script
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title=cfg.APP_TITLE,
+    page_title=cfg.APP_TITLE.title(),        # sentence case reads better in a browser tab
     page_icon=":material/travel_explore:",   # Material icon as the favicon
     layout="wide",
     initial_sidebar_state="expanded",
@@ -116,6 +140,638 @@ st.set_page_config(
 # .stVerticalBlock classes -- are the DOM structure Streamlit 1.6x emits; the
 # rules are written so that if a future release renames them the page simply
 # loses the card polish instead of breaking.
+# ---------------------------------------------------------------------------
+# EDITORIAL STYLESHEET
+# ---------------------------------------------------------------------------
+# Rules are grouped in the order a reader meets them: tokens, canvas, hero,
+# type, buttons, tabs, then the component polish (cards, metrics, inputs,
+# sidebar, chart frames). Everything is written against CSS variables so the
+# palette stays in ``.streamlit/config.toml``.
+#
+# The only values declared here are the *tokens* below (the editorial palette,
+# so ``--editorial-ink`` and friends can be used anywhere) plus the two font
+# stacks. Each stack names a local fallback -- Didot / Bodoni 72 on macOS,
+# Georgia elsewhere; system sans for Montserrat -- so an offline machine still
+# gets an elegant serif instead of Times.
+# Weights map as follows:
+#   Bodoni  400 regular, 500 italic  -- the headline and all display type
+#   Montserrat 300 / 400             -- body copy, labels, buttons
+#
+# These are the latin-subset files from Google's own CSS, declared explicitly
+# below. The theme still lists both Google Fonts URLs (so Streamlit's own
+# @font-face rules exist as a second source), but the page does not depend on
+# them: the local declarations are what make the typography deterministic.
+_BODONI_REGULAR = "https://fonts.gstatic.com/s/bodonimoda/v28/aFTH7PxzY382XsXX63LUYL6GYFcan6NJrKp-VPj1KOxQVAS1Eg.woff2"
+_BODONI_ITALIC = "https://fonts.gstatic.com/s/bodonimoda/v28/aFT07PxzY382XsXX63LUYJSPUqb0pL6OQqxrZLnVbvZedvJtj-V7tIaZKMNItnDIUQT6oPgY.woff2"
+_MONTSERRAT_LATIN = "https://fonts.gstatic.com/s/montserrat/v31/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.woff2"
+
+_EDITORIAL_CSS = f"""
+<style>
+/* ---- Fonts ---------------------------------------------------------
+   The faces are declared here, under the app's own family names, and the
+   theme's Google Fonts URLs are only a fallback (see the order of
+   --editorial-serif / --editorial-sans below). Two problems made this
+   necessary, and both are invisible in a screenshot until you read the type:
+
+   1. Streamlit's generated rules from a css2 URL attach opaque unicode-range
+      subsets and a fixed font-style; with a serif and a sans on the page, the
+      browser painted the serif headline with the sans face.
+   2. Declaring the same family name as the theme ('Bodoni Moda' /
+      'Montserrat') let the two rule sets contend for the same name.
+
+   So: one latin face per weight under unique names, then the Google family,
+   then a local Didone (Didot / Bodoni 72) or Georgia -- never Times.
+
+     Editorial Serif 400        headline, section headings, metric numbers
+     Editorial Serif 500 italic the hero standfirst and card notes
+     Editorial Sans 300/400     body copy, labels, buttons
+*/
+@font-face {{
+    font-family: 'Editorial Serif';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('{_BODONI_REGULAR}') format('woff2');
+}}
+@font-face {{
+    font-family: 'Editorial Serif';
+    font-style: italic;
+    font-weight: 500;
+    font-display: swap;
+    src: url('{_BODONI_ITALIC}') format('woff2');
+}}
+@font-face {{
+    font-family: 'Editorial Sans';
+    font-style: normal;
+    font-weight: 300;
+    font-display: swap;
+    src: url('{_MONTSERRAT_LATIN}') format('woff2');
+}}
+@font-face {{
+    font-family: 'Editorial Sans';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('{_MONTSERRAT_LATIN}') format('woff2');
+}}
+
+:root {{
+    --editorial-black: #0A0A0A;
+    --editorial-surface: #121212;
+    --editorial-ink: #F5F5F5;
+    --editorial-muted: #A0A0A0;
+    --editorial-rule: rgba(255, 255, 255, 0.16);
+    --editorial-rule-soft: rgba(255, 255, 255, 0.08);
+    --editorial-serif: 'Editorial Serif', 'Bodoni Moda', 'Bodoni 72', Didot,
+        Georgia, 'Times New Roman', serif;
+    --editorial-sans: 'Editorial Sans', 'Montserrat', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    --editorial-gutter: clamp(1.25rem, 5vw, 7rem);
+}}
+
+/* ---- Canvas: near-black paper, cinematic breathing room -------------- */
+.stApp {{
+    background-color: var(--editorial-black);
+    color: var(--editorial-muted);
+    font-family: var(--editorial-sans);
+    font-weight: 300;
+}}
+[data-testid="stAppViewContainer"] {{background-color: var(--editorial-black);}}
+[data-testid="stHeader"] {{
+    background: transparent;
+    backdrop-filter: none;
+}}
+[data-testid="stToolbar"] {{right: 1rem;}}
+
+/* The streamlit-wide content column: wide side gutters, long vertical
+   rhythm. 96rem keeps long paragraphs readable on a 27" display. */
+[data-testid="stMainBlockContainer"] {{
+    max-width: 96rem;
+    padding: 2.5rem var(--editorial-gutter) 7rem;
+}}
+
+/* ---- Hero ------------------------------------------------------------ */
+.hero {{
+    max-width: 62rem;
+    padding: 1.5rem 0 clamp(3.5rem, 7vw, 6.5rem);
+    border-bottom: 1px solid var(--editorial-rule);
+    margin-bottom: clamp(2.5rem, 5vw, 4.5rem);
+}}
+.hero-meta {{
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem 2rem;
+    margin-bottom: clamp(1.75rem, 4vw, 3.5rem);
+    font-family: var(--editorial-sans);
+    font-size: 0.68rem;
+    font-weight: 300;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--editorial-muted);
+}}
+.hero-meta .hero-mark {{color: var(--editorial-ink);}}
+.hero-meta .hero-issue {{text-align: right;}}
+
+/* The headline.
+   * Uppercase is forced by the CSS (and the copy in config.APP_TITLE is
+     already uppercase), so the line can never drift back to sentence case.
+   * Bodoni at weight 400 -- a Didone has all its drama in its thin/thick
+     stroke contrast; bolder weights just make it shout.
+   * line-height 0.95 so the three lines stack like a magazine cover line,
+     left aligned, with a *slight* negative tracking: at display sizes the
+     default tracking is airy between caps. */
+h1.hero-title {{
+    font-family: var(--editorial-serif);
+    font-size: clamp(2.5rem, 7.4vw, 6.75rem);
+    font-weight: 400;
+    font-style: normal;
+    font-optical-sizing: auto;
+    line-height: 0.95;
+    letter-spacing: -0.015em;
+    text-transform: uppercase;
+    text-align: left;
+    color: var(--editorial-ink);
+    margin: 0 0 clamp(1.5rem, 3vw, 2.25rem) 0;
+    padding: 0;
+    max-width: 18ch;
+    text-wrap: balance;
+}}
+.hero-sub {{
+    font-family: var(--editorial-serif);
+    font-size: clamp(1rem, 1.35vw, 1.2rem);
+    font-style: italic;
+    font-weight: 500;
+    line-height: 1.6;
+    color: var(--editorial-muted);
+    max-width: 54ch;
+    margin: 0;
+}}
+/* The hero's call to action. It is plain HTML (not an st.button) only because
+   it just scrolls to the guide; it is painted by the same rules as every
+   Streamlit button below, so the two are visually indistinguishable. */
+.hero-cta {{
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 2rem 0 0;
+    padding: 0.95rem 2.4rem;
+    background: transparent;
+    color: var(--editorial-ink);
+    border: 0;
+    outline: 1px solid #F5F5F5;
+    outline-offset: -1px;
+    border-radius: 0;
+    font-family: var(--editorial-sans);
+    font-size: 0.68rem;
+    font-weight: 400;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    line-height: 1.1;
+    cursor: pointer;
+    transition: background-color 180ms ease, color 180ms ease;
+}}
+.hero-cta:hover,
+.hero-cta:focus-visible {{
+    background: #F5F5F5;
+    color: #0A0A0A;
+}}
+/* The tabs' scroll target; the sticky Streamlit header would otherwise cover
+   the first heading after a jump. */
+#guide {{scroll-margin-top: 4.5rem;}}
+
+/* ---- Type system -----------------------------------------------------
+   Section headings are Bodoni; every other piece of text is Montserrat 300
+   with wide tracking, which is what makes the page read "luxury print".
+   The headline rule is repeated after the generic heading rule on purpose:
+   ``.stApp h1`` (0,1,1) is more specific than ``h1.hero-title`` (0,1,1) only
+   on a tie, so whichever comes last wins -- keeping the hero last means it
+   can never lose its uppercase / 0.95 leading to the section-heading rule. */
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {{
+    font-family: var(--editorial-serif);
+    font-weight: 400;
+    letter-spacing: 0.01em;
+    color: var(--editorial-ink);
+    text-transform: none;
+}}
+.stApp h2 {{
+    font-size: clamp(1.8rem, 3vw, 2.4rem);
+    line-height: 1.12;
+    margin: 0 0 1.25rem;
+}}
+/* Section headings (### ...) carry a hairline above them, like a chapter
+   opener in a magazine. */
+.stApp h3 {{
+    font-size: clamp(1.35rem, 2.1vw, 1.7rem);
+    line-height: 1.2;
+    padding-top: 1.6rem;
+    border-top: 1px solid var(--editorial-rule);
+    margin: 0.5rem 0 1.1rem;
+}}
+.stApp h4 {{
+    font-size: 1.1rem;
+    line-height: 1.3;
+    margin: 1.6rem 0 0.7rem;
+}}
+.stApp p, .stApp li, .stApp label, .stApp span, .stApp div[data-testid="stMarkdownContainer"] {{
+    font-family: var(--editorial-sans);
+}}
+.stApp p, .stApp li {{
+    font-weight: 300;
+    line-height: 1.85;
+    letter-spacing: 0.02em;
+    color: var(--editorial-muted);
+}}
+/* Headings: Streamlit wraps markdown headings as
+   <div data-testid="stHeadingWithActionElements"><h1><span data-heading-text>
+   and the *span* is what actually carries the glyphs. So the type must be
+   re-asserted on that span (``inherit`` pulls it from the h1), otherwise the
+   broad p/li/span rules above would re-typeset every ## and ### heading in the
+   body sans -- a mistake that is easy to miss because the h1's own computed
+   font-family still reads correctly. */
+.stApp [data-testid="stHeadingWithActionElements"] > * > span[data-heading-text],
+.stApp [data-testid="stHeadingWithActionElements"] > * > span[data-heading-text] * {{
+    font-family: inherit;
+    color: inherit;
+    text-transform: inherit;
+}}
+.stApp [data-testid="stHeadingWithActionElements"] > * > span[data-heading-text] {{
+    display: inline;
+}}
+.stApp strong, .stApp b {{color: var(--editorial-ink); font-weight: 500;}}
+.stApp a {{color: var(--editorial-ink); text-underline-offset: 0.3em; font-weight: 400;}}
+.stApp hr {{border-color: var(--editorial-rule);}}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{
+    font-size: 0.7rem;
+    font-weight: 300;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    line-height: 1.7;
+    color: var(--editorial-muted);
+    opacity: 0.85;
+}}
+[data-testid="stCaptionContainer"] strong {{color: var(--editorial-ink);}}
+
+/* The hero headline, repeated after the generic heading rule so it always
+   wins the tie (see the note in "Type system" above). */
+h1.hero-title {{
+    font-family: var(--editorial-serif);
+    font-size: clamp(2.5rem, 7.4vw, 6.75rem);
+    font-weight: 400;
+    font-style: normal;
+    font-optical-sizing: auto;
+    line-height: 0.95;
+    letter-spacing: -0.015em;
+    text-transform: uppercase;
+    text-align: left;
+    color: var(--editorial-ink);
+    margin: 0 0 clamp(1.5rem, 3vw, 2.25rem) 0;
+    padding: 0;
+    max-width: 18ch;
+    text-wrap: balance;
+}}
+
+/* ---- Buttons: the outlined "APPLY NOW" treatment ---------------------
+   Transparent fill, hairline off-white border, uppercase Montserrat with
+   wide tracking, square corners. Applies to every button kind (primary,
+   secondary, download) so the page never shows a filled accent button.
+
+   The border is drawn with an inset box-shadow instead of ``border``:
+   Streamlit owns the ``border`` shorthand on these buttons and sets it again
+   on hover/focus, which would knock a one-pixel border out of alignment and
+   shift the label. A box-shadow is not in its way, so the hover fill and
+   the focus ring can be layered without a layout jump. */
+.stApp .stButton > button,
+.stApp .stDownloadButton > button,
+.stApp button[data-testid^="stBaseButton-"] {{
+    background: transparent;
+    color: var(--editorial-ink);
+    box-shadow: inset 0 0 0 1px #F5F5F5;
+    border: none;
+    border-radius: 0;
+    padding: 0.95rem 2.4rem;
+    min-height: 0;
+    font-family: var(--editorial-sans);
+    font-size: 0.68rem;
+    font-weight: 400;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    line-height: 1.1;
+    transition: background-color 180ms ease, color 180ms ease,
+                box-shadow 180ms ease;
+}}
+.stApp .stButton > button:hover,
+.stApp .stDownloadButton > button:hover,
+.stApp button[data-testid^="stBaseButton-"]:hover {{
+    background: #F5F5F5;
+    color: #0A0A0A;
+    box-shadow: inset 0 0 0 1px #F5F5F5;
+    border: none;
+}}
+.stApp .stButton > button:focus:not(:active),
+.stApp .stDownloadButton > button:focus:not(:active),
+.stApp button[data-testid^="stBaseButton-"]:focus:not(:active) {{
+    color: var(--editorial-ink);
+    border: none;
+    box-shadow: inset 0 0 0 1px #F5F5F5, 0 0 0 3px rgba(245, 245, 245, 0.18);
+}}
+/* ...except the chrome-only icon buttons (sidebar collapse, toolbar menu,
+   expander carets, modal close) -- those must stay icon-sized. */
+.stApp button[data-testid="stBaseButton-headerNoPadding"],
+.stApp button[data-testid="stBaseButton-header"],
+.stApp button[data-testid="stBaseButton-elementToolbar"],
+.stApp button[data-testid="stBaseButton-borderlessIcon"] {{
+    padding: 0.25rem;
+    box-shadow: none;
+    background: transparent;
+}}
+.stApp button[data-testid="stBaseButton-headerNoPadding"]:hover,
+.stApp button[data-testid="stBaseButton-header"]:hover {{
+    background: transparent;
+    color: var(--editorial-ink);
+}}
+.stApp button[data-testid="stBaseButton-headerNoPadding"]:hover svg,
+.stApp button[data-testid="stBaseButton-header"]:hover svg {{color: var(--editorial-ink);}}
+
+/* ---- Tabs: a hairline nav bar with an underlined active label -------
+   Streamlit 1.6x renders each tab as div[role="tab"][data-testid="stTab"]
+   inside [data-baseweb="tab-list"], with a [data-baseweb="tab-highlight"]
+   bar marking the selection. Both selectors are targeted so this keeps
+   working if the element changes from a div to a button. */
+.stApp [data-baseweb="tab-list"] {{
+    gap: 2.75rem;
+    border-bottom: 1px solid var(--editorial-rule);
+    background: transparent;
+}}
+.stApp [data-baseweb="tab-highlight"] {{
+    background-color: var(--editorial-ink);
+    height: 1px;
+}}
+.stApp [data-baseweb="tab-border"] {{background-color: transparent;}}
+.stApp [role="tab"],
+.stApp button[data-baseweb="tab"] {{
+    background: transparent;
+    padding: 0.9rem 0 1.05rem;
+    font-family: var(--editorial-sans) !important;
+    font-size: 0.68rem;
+    font-weight: 400;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--editorial-muted);
+    border: none;
+}}
+/* Only the *text* inside a tab inherits the label styling. The icon is a
+   `<span role="img">` whose ligature needs the Material Symbols font from its
+   inline style, so it is explicitly excluded here and from every other span
+   rule -- including it printed the ligature name ("smart_toy") as words. */
+.stApp [role="tab"] p, .stApp [role="tab"] span:not([role="img"]) {{
+    font: inherit !important;
+    letter-spacing: inherit !important;
+    color: inherit !important;
+    text-transform: inherit !important;
+}}
+.stApp [role="tab"] span[role="img"] {{
+    font-family: "Material Symbols Rounded", "Material Symbols Outlined", sans-serif !important;
+    font-weight: 300 !important;
+    letter-spacing: normal !important;
+    margin-right: 0.5rem;
+    vertical-align: -0.15em !important;
+}}
+.stApp [role="tab"]:hover {{color: var(--editorial-ink); background: transparent;}}
+.stApp [role="tab"][aria-selected="true"] {{color: var(--editorial-ink);}}
+.stApp [data-baseweb="tab-panel"] {{padding-top: 2.25rem;}}
+/* ---- Cards -----------------------------------------------------------
+   Every ``st.container(border=True)`` becomes a hairline "plate": square,
+   near-black, no shadow. On paper this is a rule box, not a card. */
+.stApp [data-testid="stVerticalBlockBorderWrapper"] {{
+    border-radius: 0;
+    border-color: var(--editorial-rule);
+    background: transparent;
+}}
+.stApp [data-testid="stVerticalBlockBorderWrapper"] > div {{
+    padding: clamp(1.1rem, 2vw, 1.75rem);
+}}
+
+/* ---- Metrics: a display number over a tracked micro-label ------------
+   Streamlit renders the label as <label><icon><div>text</div></label>, and
+   the icon is a ligature in the Material Symbols font, so it must keep that
+   font (setting Montserrat on the whole label would print "home_work"
+   literally). The icon is therefore pinned to the symbol font, muted, and
+   laid out on its own line above the text. */
+.stApp [data-testid="stMetric"] {{
+    padding: 1.1rem 0 1.2rem;
+    border-top: 1px solid var(--editorial-rule);
+}}
+.stApp [data-testid="stMetricLabel"] {{
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}}
+.stApp [data-testid="stMetricLabel"] [data-testid="stMetricIcon"] {{
+    font-family: "Material Symbols Rounded", "Material Symbols Outlined", sans-serif !important;
+    font-size: 0.85rem;
+    color: var(--editorial-muted);
+    opacity: 0.8;
+}}
+.stApp [data-testid="stMetricLabel"] div,
+.stApp [data-testid="stMetricLabel"] span:not([data-testid]) {{
+    font-family: var(--editorial-sans) !important;
+    font-size: 0.66rem !important;
+    font-weight: 300 !important;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--editorial-muted);
+}}
+.stApp [data-testid="stMetricLabel"] p {{
+    font-size: 0.66rem;
+    font-weight: 300;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--editorial-muted);
+    margin: 0;
+}}
+.stApp [data-testid="stMetricValue"] {{
+    font-family: var(--editorial-serif);
+    font-weight: 400;
+    font-size: clamp(1.8rem, 2.4vw, 2.5rem);
+    line-height: 1.05;
+    color: var(--editorial-ink);
+    letter-spacing: 0;
+}}
+.stApp [data-testid="stMetricDelta"] {{
+    font-family: var(--editorial-sans);
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+}}
+
+/* ---- Form controls: hairline boxes, tracked micro-labels -------------- */
+.stApp [data-testid="stWidgetLabel"] p {{
+    font-size: 0.66rem;
+    font-weight: 300;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--editorial-muted);
+}}
+.stApp [data-baseweb="input"],
+.stApp [data-baseweb="select"] > div,
+.stApp [data-baseweb="base-input"],
+.stApp [data-testid="stTextInputRootElement"] {{
+    background-color: transparent;
+    border-radius: 0;
+    border-color: var(--editorial-rule);
+}}
+.stApp [data-baseweb="input"]:focus-within,
+.stApp [data-baseweb="select"] > div:focus-within {{
+    border-color: var(--editorial-ink);
+    box-shadow: none;
+}}
+.stApp input, .stApp textarea {{
+    font-family: var(--editorial-sans);
+    font-weight: 300;
+    letter-spacing: 0.04em;
+    color: var(--editorial-ink);
+}}
+.stApp button[data-baseweb="select"],
+.stApp [data-baseweb="tag"] {{
+    border-radius: 0;
+    background-color: transparent;
+    font-family: var(--editorial-sans);
+    font-weight: 300;
+    letter-spacing: 0.06em;
+}}
+.stApp [data-baseweb="tag"] {{border: 1px solid var(--editorial-rule);}}
+.stApp [data-baseweb="popover"] [role="option"],
+.stApp [data-baseweb="menu"] {{border-radius: 0;}}
+
+/* ---- Sidebar: same paper, separated by a hairline -------------------- */
+[data-testid="stSidebar"] {{
+    background-color: var(--editorial-black);
+    border-right: 1px solid var(--editorial-rule);
+}}
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {{
+    border-top: none;
+    padding-top: 0;
+    font-family: var(--editorial-serif);
+}}
+[data-testid="stSidebar"] [data-testid="stExpander"] details,
+[data-testid="stSidebar"] [data-testid="stExpander"] summary {{
+    background: transparent;
+    border: none;
+    border-radius: 0;
+}}
+[data-testid="stSidebar"] [data-testid="stExpander"] details {{
+    border-top: 1px solid var(--editorial-rule);
+}}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary p,
+.stApp [data-testid="stExpander"] summary p {{
+    font-size: 0.68rem;
+    font-weight: 300;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--editorial-ink);
+}}
+.stApp [data-testid="stExpander"] details {{
+    border-radius: 0;
+    border-color: var(--editorial-rule);
+    background: transparent;
+}}
+/* The sidebar-collapse arrow has no testid of its own -- it is a ligature in a
+   plain span inside the header button -- so pin that span to the symbol font
+   through its parent button. */
+[data-testid="stSidebar"] button[data-testid="stBaseButton-headerNoPadding"] span span {{
+    font-family: "Material Symbols Rounded", "Material Symbols Outlined", sans-serif !important;
+    letter-spacing: normal !important;
+}}
+
+/* ---- Material icon glyphs -------------------------------------------
+   Streamlit renders ``icon=`` arguments and ``:material/name:`` tokens as
+   ligature text inside a span, so the span must keep the Material Symbols
+   font. The broad ``p, li, span`` type rules above would otherwise set those
+   spans in Montserrat and print the ligature name ("check_circle") as words,
+   which is what made the sidebar labels collide. This selector wins on
+   specificity (0,2,1) over the type rules and restores the symbol font. */
+.stApp [data-testid="stIconMaterial"],
+.stApp [data-testid="stExpanderIcon"],
+.stApp [data-testid="stExpanderIcon"] span,
+.stApp [data-testid="stExpanderToggleIcon"],
+.stApp [data-testid="stExpanderToggleIcon"] span,
+.stApp [data-testid="stAlertDynamicIcon"],
+.stApp [data-testid="stToastIcon"],
+.stApp [role="img"] {{
+    font-family: "Material Symbols Rounded", "Material Symbols Outlined", sans-serif !important;
+    font-feature-settings: "liga" !important;
+    -webkit-font-feature-settings: "liga" !important;
+    letter-spacing: normal !important;
+    text-transform: none !important;
+    font-weight: 400 !important;
+}}
+
+/* ---- Sidebar body copy ----------------------------------------------
+   Sidebar captions and widget labels are markdown paragraphs nested in
+   emotion divs, so the generic paragraph rule's tall line-height makes each
+   expander row taller than its icon. Tighten the rhythm in the sidebar only. */
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{
+    line-height: 1.6;
+    margin-bottom: 0;
+}}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
+    font-size: 0.62rem;
+    letter-spacing: 0.16em;
+    line-height: 1.9;
+}}
+
+/* ---- Charts and the map sit in thin frames --------------------------- */
+[data-testid="stPlotlyChart"], [data-testid="stPydeckChart"],
+[data-testid="stDataFrame"] {{border-radius: 0;}}
+[data-testid="stPydeckChart"] iframe {{filter: saturate(0.85) contrast(1.02);}}
+
+/* ---- Alerts and code: quiet, hairline, upper-case micro-headings ----- */
+.stApp [data-testid="stAlert"] {{
+    border-radius: 0;
+    background-color: var(--editorial-surface);
+    border-left: 1px solid var(--editorial-ink);
+}}
+.stApp [data-testid="stAlert"] p {{
+    font-size: 0.82rem;
+    letter-spacing: 0.03em;
+    line-height: 1.75;
+}}
+.stApp code {{
+    font-size: 0.8rem;
+    background-color: var(--editorial-surface);
+    border-radius: 0;
+}}
+
+/* ---- Cinematic spacing between top-level blocks ---------------------- */
+[data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] {{gap: 1.1rem;}}
+[data-testid="stMainBlockContainer"] > div {{animation: editorial-fade 520ms ease both;}}
+@keyframes editorial-fade {{
+    from {{opacity: 0; transform: translateY(6px);}}
+    to   {{opacity: 1; transform: none;}}
+}}
+@media (prefers-reduced-motion: reduce) {{
+    [data-testid="stMainBlockContainer"] > div {{animation: none;}}
+}}
+</style>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Inject the stylesheet once, as early as possible so the page never paints a
+# flash of default Streamlit styling before the editorial type loads. It is
+# injected with ``st.markdown(..., unsafe_allow_html=True)`` (the classic
+# route, and the one this module documents) *and* with ``st.html``: identical
+# rules applied twice are free, and it keeps the theme working whichever
+# mechanism a future Streamlit release renders first.
+# ---------------------------------------------------------------------------
+st.markdown(_EDITORIAL_CSS, unsafe_allow_html=True)
+st.html(_EDITORIAL_CSS)
+
+# ---------------------------------------------------------------------------
+# Component selectors for the equal-height card rows and the map frame
+# ---------------------------------------------------------------------------
 _CARD_ROWS = """.st-key-cardrow > div > [data-testid="stHorizontalBlock"],
 .st-key-kpirow > div > [data-testid="stHorizontalBlock"]"""
 
@@ -128,75 +784,17 @@ _CARD_STACKS = """.st-key-cardrow > div > [data-testid="stHorizontalBlock"] > .s
 _CARD_WRAPPERS = """.st-key-cardrow > div > [data-testid="stHorizontalBlock"] > .stColumn > .stVerticalBlock > [data-testid="stLayoutWrapper"],
 .st-key-kpirow > div > [data-testid="stHorizontalBlock"] > .stColumn > .stVerticalBlock > [data-testid="stLayoutWrapper"]"""
 
-st.html(
-    f"""
-    <style>
-    /* ---- Page rhythm -------------------------------------------------
-       Top/bottom padding and the content width now come from theme.paddingTop
-       / theme.paddingBottom in .streamlit/config.toml, so nothing here has to
-       fight the toolbar. Only the transparent header remains, which the theme
-       has no key for. */
-    [data-testid="stHeader"] {{background: transparent;}}
-
-    /* ---- Hero banner (presentation of the title, not a widget) -------- */
-    .hero-card {{
-        position: relative;
-        padding: 2.1rem 2.2rem 1.9rem;
-        border-radius: 1.25rem;
-        overflow: hidden;
-        color: #FFFFFF;
-        background:
-            radial-gradient(900px 320px at 88% -25%, rgba(255, 56, 92, 0.55), transparent 60%),
-            radial-gradient(600px 240px at 0% 120%, rgba(56, 189, 248, 0.28), transparent 65%),
-            linear-gradient(135deg, #14171F 0%, #1F2430 55%, #2A1E27 100%);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-    }}
-    .hero-eyebrow {{
-        display: inline-flex;
-        align-items: center;
-        gap: 0.45rem;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        font-size: 0.72rem;
-        font-weight: 600;
-        color: #FFC6CF;
-        margin-bottom: 0.7rem;
-    }}
-    .hero-title {{
-        font-size: clamp(1.9rem, 3.4vw, 2.7rem);
-        font-weight: 800;
-        line-height: 1.08;
-        letter-spacing: -0.02em;
-        margin: 0 0 0.6rem 0;
-        color: #FFFFFF;
-    }}
-    .hero-sub {{
-        max-width: 62ch;
-        color: rgba(255, 255, 255, 0.78);
-        font-size: 1.02rem;
-        line-height: 1.55;
-        margin: 0;
-    }}
-    .hero-meta {{
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.45rem;
-        margin-top: 1.1rem;
-    }}
-    .hero-chip {{
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        padding: 0.28rem 0.7rem;
-        border-radius: 999px;
-        font-size: 0.76rem;
-        font-weight: 600;
-        color: rgba(255, 255, 255, 0.9);
-        background: rgba(255, 255, 255, 0.09);
-        border: 1px solid rgba(255, 255, 255, 0.14);
-        backdrop-filter: blur(4px);
-    }}
-
+# ---------------------------------------------------------------------------
+# COMPONENT POLISH
+# ---------------------------------------------------------------------------
+# The editorial identity (canvas, type, hero, buttons, tabs, form controls) is
+# declared wholesale in ``_EDITORIAL_CSS`` above. What remains here is the
+# grid mechanics from the composited page (equal-height card rows via subgrid)
+# plus the two small editorial components that only exist as markup: the card
+# heading/note pairs and the map legend. Same rules as before, restated in the
+# magazine language: square, hairline, tracked.
+_COMPONENT_CSS = f"""
+<style>
     /* ---- Equal-height card rows ---------------------------------------
        Each st.columns cell stacks its contents into one child block. Giving
        those blocks a single shared row track plus
@@ -226,123 +824,160 @@ st.html(
         flex: 1 1 auto;
     }}
 
-    /* ---- Card headings ------------------------------------------------ */
+    /* ---- Card headings -------------------------------------------------
+       An uppercase, tracked Montserrat "kicker" with a serif note beneath it
+       -- the same hierarchy as a magazine sidebar. The inline Material icon
+       is muted to the body grey so it reads as a bullet, not a badge. */
     .card-head {{
         display: flex;
         align-items: center;
-        gap: 0.45rem;
-        font-weight: 700;
-        font-size: 0.95rem;
+        gap: 0.55rem;
         margin: 0;
-        color: var(--text-color);
+        font-family: var(--editorial-sans);
+        font-size: 0.68rem;
+        font-weight: 400;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        color: var(--editorial-ink);
     }}
-    .card-head svg {{color: var(--primary-color); flex: none;}}
+    .card-head svg {{color: var(--editorial-muted); flex: none;}}
     .card-note {{
-        color: var(--text-color);
-        opacity: 0.66;
-        font-size: 0.82rem;
-        margin: 0 0 0.2rem 0;
+        margin: 0.35rem 0 0.15rem 0;
+        font-family: var(--editorial-serif);
+        font-size: 0.95rem;
+        font-style: italic;
+        font-weight: 500;
+        line-height: 1.5;
+        letter-spacing: 0;
+        color: var(--editorial-muted);
     }}
 
-    /* ---- Map frame + legend ------------------------------------------- */
+    /* ---- Map frame + legend -------------------------------------------- */
     .map-frame [data-testid="stPydeckChart"],
-    .map-frame iframe {{border-radius: 0.9rem; overflow: hidden;}}
+    .map-frame iframe {{border-radius: 0; overflow: hidden;}}
     .map-legend {{
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 1.1rem;
-        padding: 0.55rem 0.9rem;
-        border-radius: 0.75rem;
-        border: 1px solid var(--border-color);
-        background: var(--secondary-background-color);
-        font-size: 0.8rem;
-        color: var(--text-color);
-        margin-top: 0.55rem;
+        gap: 1.4rem;
+        padding: 0.85rem 0;
+        border-top: 1px solid var(--editorial-rule);
+        border-bottom: 1px solid var(--editorial-rule);
+        background: transparent;
+        border-radius: 0;
+        font-family: var(--editorial-sans);
+        font-size: 0.64rem;
+        font-weight: 300;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--editorial-muted);
+        margin-top: 0.9rem;
     }}
     .map-legend .swatch {{
         display: inline-block;
-        width: 0.72rem; height: 0.72rem;
-        border-radius: 0.2rem;
-        margin-right: 0.35rem;
-        vertical-align: -0.08rem;
+        width: 0.6rem; height: 0.6rem;
+        border-radius: 50%;
+        background: #F5F5F5;
+        margin-right: 0.45rem;
+        vertical-align: -0.02rem;
     }}
     .map-legend .gradient {{
         display: inline-block;
-        width: 4.5rem; height: 0.5rem;
-        border-radius: 999px;
-        margin: 0 0.35rem;
-        vertical-align: -0.06rem;
-        background: linear-gradient(90deg, #3D8BFF, #FF385C);
+        width: 4.5rem; height: 1px;
+        border-radius: 0;
+        margin: 0 0.5rem;
+        vertical-align: 0.18rem;
+        background: linear-gradient(90deg, #3A3A3A, #F5F5F5);
     }}
 
     /* ---- Listing grid (hover preview fallback) ------------------------
        The deck.gl tooltip is the primary hover preview, but it needs a
-       WebGL canvas that can be pick the marker. The grid below gives every
+       WebGL canvas that can pick the marker. The grid below gives every
        listing the same photo + price card in plain HTML, so the feature still
-       works on a device/browser where the canvas cannot be hovered. */
+       works on a device/browser where the canvas cannot be hovered.
+       Editorial treatment: square crop, hairline frame, the name set in
+       Bodoni and the price in tracked uppercase Montserrat beneath a rule. */
     .listing-grid {{
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-        gap: 0.9rem;
-        margin-top: 0.4rem;
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+        gap: 1.6rem 1.1rem;
+        margin-top: 1rem;
     }}
     .listing-card {{
         position: relative;
-        border-radius: 0.85rem;
+        border-radius: 0;
         overflow: hidden;
-        background: var(--secondary-background-color);
-        border: 1px solid var(--border-color);
-        transition: transform 140ms ease, box-shadow 140ms ease,
-                    border-color 140ms ease;
+        background: transparent;
+        border: 1px solid var(--editorial-rule-soft);
+        transition: border-color 200ms ease;
     }}
     .listing-card:hover,
     .listing-card:focus-within {{
-        transform: translateY(-2px);
-        border-color: var(--primary-color);
-        box-shadow: 0 12px 26px rgba(0, 0, 0, 0.16);
+        border-color: var(--editorial-ink);
     }}
     .listing-card .thumb {{
         display: block;
         width: 100%;
-        aspect-ratio: 5 / 3;
+        aspect-ratio: 4 / 5;
         object-fit: cover;
-        background: var(--secondary-background-color);
+        background: var(--editorial-surface);
+        filter: grayscale(0.25) contrast(1.02);
+        transition: filter 320ms ease;
     }}
+    .listing-card:hover .thumb,
+    .listing-card:focus-within .thumb {{filter: grayscale(0);}}
     .listing-card .body {{
-        padding: 0.55rem 0.7rem 0.65rem;
-        font-size: 0.8rem;
-        line-height: 1.35;
-        color: var(--text-color);
+        padding: 0.75rem 0.1rem 0.85rem;
+        font-family: var(--editorial-sans);
+        font-size: 0.68rem;
+        font-weight: 300;
+        letter-spacing: 0.14em;
+        line-height: 1.5;
+        color: var(--editorial-muted);
+        text-transform: uppercase;
     }}
     .listing-card .name {{
-        font-weight: 700;
+        font-family: var(--editorial-serif);
+        font-size: 1rem;
+        font-weight: 400;
+        letter-spacing: 0;
+        text-transform: none;
+        color: var(--editorial-ink);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        margin-bottom: 0.2rem;
     }}
-    .listing-card .meta {{opacity: 0.72; margin-top: 0.1rem;}}
+    .listing-card .meta {{margin-top: 0.1rem;}}
     .listing-card .price {{
-        font-weight: 700;
-        color: var(--primary-color);
-        margin-top: 0.2rem;
+        margin-top: 0.45rem;
+        padding-top: 0.45rem;
+        border-top: 1px solid var(--editorial-rule-soft);
+        font-weight: 400;
+        letter-spacing: 0.2em;
+        color: var(--editorial-ink);
     }}
     .listing-card .preview {{
         position: absolute;
         inset: auto 0 0 0;
         padding: 0.5rem 0.7rem;
-        font-size: 0.72rem;
-        font-weight: 600;
-        color: #FFFFFF;
-        background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.62));
+        font-size: 0.62rem;
+        font-weight: 400;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--editorial-ink);
+        background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.85));
         opacity: 0;
-        transition: opacity 140ms ease;
+        transition: opacity 200ms ease;
     }}
     .listing-card:hover .preview,
     .listing-card:focus-within .preview {{opacity: 1;}}
-    </style>
-    """
-)
+</style>
+"""
+
+st.html(_COMPONENT_CSS)
+
+
 # ---------------------------------------------------------------------------
 # MATERIAL ICONS
 # ---------------------------------------------------------------------------
@@ -587,27 +1222,30 @@ def render_sidebar() -> dict[str, Any]:
         ``force_download``, ``reviews_limit``, ``engine``, ``llm_provider``.
     """
     st.sidebar.markdown(
-        f"<div style='display:flex;align-items:center;gap:.55rem;"
-        f"color:var(--primary-color);font-weight:800;font-size:1.05rem;"
-        f"letter-spacing:-.01em'>{material_icon('explore', 24)}"
-        f"<span style='color:var(--text-color)'>NYC Travel Planner</span></div>",
+        "<div style='padding:.35rem 0 1.1rem;border-bottom:1px solid "
+        "var(--editorial-rule);margin-bottom:1.1rem'>"
+        "<div style=\"font-family:var(--editorial-serif);font-size:1.35rem;"
+        "line-height:1;color:var(--editorial-ink);letter-spacing:.01em\">"
+        "The Top Reviewed</div>"
+        "<div style=\"font-family:var(--editorial-sans);font-size:.6rem;"
+        "font-weight:300;letter-spacing:.34em;text-transform:uppercase;"
+        "color:var(--editorial-muted);margin-top:.55rem\">NYC &middot; Airbnb</div>"
+        "</div>",
         unsafe_allow_html=True,
     )
     st.sidebar.caption("Capstone Project - Programming for Data Science")
 
     with st.sidebar.expander("Data Source", icon=":material/database:", expanded=True):
-        if da.kaggle_credentials_available():
-            st.success("Kaggle credentials detected.", icon=":material/check_circle:")
-        else:
-            st.warning(
-                "No Kaggle credentials found, so the app will use the Inside "
-                "Airbnb mirror or demo data. See README step 3 to add your key.",
-                icon=":material/key_off:",
-            )
+        st.success(
+            f"Inside Airbnb, NYC snapshot {cfg.INSIDE_AIRBNB_SNAPSHOT} "
+            f"({cfg.INSIDE_AIRBNB_LICENSE}). No credentials needed.",
+            icon=":material/check_circle:",
+        )
         force_download = st.checkbox(
             "Force re-download",
             value=False,
-            help="Ignore the cached CSVs in data/ and fetch a fresh copy.",
+            help="Ignore the cached CSVs in data/ and fetch a fresh copy from "
+                 "Inside Airbnb.",
         )
         reviews_limit = st.select_slider(
             "Max reviews to score",
@@ -644,8 +1282,8 @@ def render_sidebar() -> dict[str, Any]:
 
     st.sidebar.divider()
     st.sidebar.caption(
-        "Data: Kaggle 'New York City Airbnb Open Data' (CC0) + Inside Airbnb "
-        "reviews. Geocoding: OpenStreetMap Nominatim. Photos: Unsplash. "
+        f"{cfg.INSIDE_AIRBNB_ATTRIBUTION}. Listings and reviews from "
+        "insideairbnb.com. Geocoding: OpenStreetMap Nominatim. "
         "Basemap: Esri World Imagery / CARTO."
     )
     return {
@@ -661,39 +1299,43 @@ def render_sidebar() -> dict[str, Any]:
 # ===========================================================================
 def _hero_html(status_chip: str) -> str:
     """
-    Compose the hero banner markup for :func:`render_header`.
+    Compose the editorial hero markup for :func:`render_header`.
+
+    Layout, top to bottom: a tracked micro-row (place on the left, dataset
+    status on the right), the headline in Bodoni, then a serif italic
+    standfirst. There is no card, gradient or chip: on paper the headline sits
+    directly on the page, separated from the body by one hairline (drawn by the
+    ``.hero`` rule in ``_EDITORIAL_CSS``).
 
     Parameters
     ----------
     status_chip:
-        Label of the live-data chip (e.g. ``"Live Kaggle data"`` or
+        Label of the live-data chip (e.g. ``"Live Inside Airbnb data"`` or
         ``"Synthetic demo data"``).
 
     Returns
     -------
     str
-        HTML for the hero card.
+        HTML for the hero block.
     """
-    chips = (
-        f"<span class='hero-chip'>{material_icon('layers', 14)}48,895 listings</span>"
-        f"<span class='hero-chip'>{material_icon('bar_chart', 14)}"
-        f"{len(cfg.BOROUGHS)} boroughs</span>"
-        f"<span class='hero-chip'>{material_icon('camera', 14)}{status_chip}</span>"
-    )
     return (
-        f"<div class='hero-card'>"
-        f"<div class='hero-eyebrow'>{material_icon('explore', 15)}"
-        f"NYC Airbnb Intelligence</div>"
+        "<div class='hero'>"
+        "<div class='hero-meta'>"
+        "<span class='hero-mark'>New York City &middot; Five Boroughs</span>"
+        f"<span class='hero-issue'>{html.escape(status_chip)} &middot; "
+        f"{html.escape(cfg.INSIDE_AIRBNB_SNAPSHOT)}</span>"
+        "</div>"
+        # The copy is already uppercase in config.APP_TITLE; the stylesheet
+        # also forces text-transform: uppercase so it can never drift back.
         f"<h1 class='hero-title'>{html.escape(cfg.APP_TITLE)}</h1>"
         f"<p class='hero-sub'>{html.escape(cfg.APP_SUBTITLE)}</p>"
-        f"<div class='hero-meta'>{chips}</div>"
-        f"</div>"
+        "</div>"
     )
 
 
 def render_header(used_synthetic: bool) -> None:
     """
-    Render the page hero banner and, when applicable, the synthetic-data alert.
+    Render the page hero and, when applicable, the synthetic-data alert.
 
     Parameters
     ----------
@@ -704,18 +1346,37 @@ def render_header(used_synthetic: bool) -> None:
     -------
     None
     """
-    chip = "Synthetic demo data" if used_synthetic else "Live Kaggle data"
-    st.html(_hero_html(chip))
+    chip = "Synthetic data in use" if used_synthetic else "Live Inside Airbnb data"
+    st.markdown(_hero_html(chip), unsafe_allow_html=True)
+
+    # Call to action, in the same outlined-button language as the editorial
+    # reference. It scrolls to the guide's tabs (anchored by the "guide"
+    # container in main) through a tiny inline handler, because st.tabs has no
+    # programmatic "select tab N" API.
+    with st.container(key="hero-cta"):
+        st.markdown(
+            "<button class='hero-cta' type='button' "
+            "onclick=\"document.getElementById('guide').scrollIntoView("
+            "{behavior:'smooth'})\">Explore The Guide</button>",
+            unsafe_allow_html=True,
+        )
+
     st.space("small")
 
     if used_synthetic:
+        # The flag is raised when EITHER table is synthetic. That can mean a fully
+        # generated demo, or real listings paired with generated review text, so
+        # the wording stays accurate for both instead of claiming that everything
+        # on the page is fake.
         st.warning(
-            "**Synthetic demo data** - the real dataset could not be reached, "
-            "so every number below comes from generated data with an identical "
-            "schema. Add Kaggle credentials (README step 3) and press "
-            "*Force re-download* for the real NYC Airbnb data.",
+            "**Synthetic data in use** - at least one source could not be "
+            "reached, so some of the figures below (sentiment in particular) come "
+            "from generated data with an identical schema. Check the connection "
+            "to insideairbnb.com and press *Force re-download* for the real NYC "
+            "Airbnb data.",
             icon=":material/warning:",
         )
+
 
 
 
@@ -765,7 +1426,10 @@ def satellite_style(scrim: bool = True) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        MapLibre-style document accepted by ``pdk.Deck(map_style=...)``.
+        MapLibre-style style document. Wrap it with :func:`satellite_style_uri`
+        before handing it to :class:`pydeck.Deck`: Streamlit's ``st.pydeck_chart``
+        frontend only accepts a *string* ``map_style`` (it calls
+        ``mapStyle.includes(...)``), so a raw dict crashes the chart.
     """
     layers: list[dict[str, Any]] = [
         {
@@ -825,6 +1489,183 @@ def satellite_style(scrim: bool = True) -> dict[str, Any]:
     }
 
 
+def satellite_style_uri(scrim: bool = True) -> str:
+    """
+    Encode the satellite style document as a ``data:`` URI string.
+
+    Why a string and not the dict
+    -----------------------------
+    ``pdk.Deck(map_style=...)`` accepts a dict, but Streamlit's
+    ``st.pydeck_chart`` frontend does ``mapStyle?.includes("cartocdn")`` and
+    ``typeof mapStyle === "string"`` before it hands the value to deck.gl. A dict
+    therefore raises ``TypeError: e.mapStyle?.includes is not a function`` inside
+    the browser and blanks the map. Encoding the same document as a
+    ``application/json`` data URI keeps the custom Esri raster style while giving
+    the frontend the plain string it expects.
+
+    The payload is ~1 KB and contains neither ``cartocdn`` nor ``mapbox``, so
+    Streamlit's built-in style/API-key branches never fire and no external style
+    file has to be hosted.
+
+    Parameters
+    ----------
+    scrim:
+        Forwarded to :func:`satellite_style`.
+
+    Returns
+    -------
+    str
+        ``data:application/json;base64,...`` URI for ``map_style``.
+    """
+    payload = json.dumps(satellite_style(scrim=scrim), separators=(",", ":"))
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    return f"data:application/json;base64,{encoded}"
+
+
+# --- Map marker: classic map-pin --------------------------------------------
+# Every listing is drawn as a classic "location pin": a round head tapering to a
+# point at the bottom, filled solid black with a small white dot in the head
+# (the familiar Google-Maps shape). It replaces the earlier extruded columns.
+#
+# Why a rasterised PNG and not inline SVG: deck.gl's IconLayer rasterises each
+# icon through an image loader, which is unreliable with ``data:image/svg+xml``
+# URIs (they can silently fail to decode, which also breaks hit-testing, so
+# hover tooltips never fire). A base64 PNG always decodes, so both the pin and
+# its hover card work everywhere.
+#
+# The image is portrait and the layer anchors at (0.5, 1.0), so the *tip* of the
+# pin sits exactly on the listing's coordinate.
+_PIN_CACHE: dict[tuple[int, int, int], str] = {}
+
+
+def pin_icon_uri(fill: tuple[int, int, int] | list[int] | str | None = None) -> str:
+    """
+    Return a base64 PNG data-URI of the map pin, drawn in ``fill``.
+
+    The shape is generated once per colour with Pillow and memoised, so a map
+    with thousands of listings still builds only a handful of images.
+
+    Geometry: a circular head (radius ``r``) whose arc is swept slightly past
+    the widest points, joined to a downward point by two symmetric cubic Bézier
+    curves. The curves are pulled inward, which gives the pin its concave
+    "shoulders" -- the detail that makes it read as a map pin rather than a
+    teardrop or an arrow.
+
+    Parameters
+    ----------
+    fill:
+        ``(r, g, b)`` 0-255 triple, ``#RRGGBB`` string, or ``None`` for black.
+
+    Returns
+    -------
+    str
+        ``data:image/png;base64,...`` URI accepted by ``IconLayer.get_icon``.
+    """
+    if fill is None:
+        rgb = (0, 0, 0)
+    elif isinstance(fill, str):
+        rgb = hex_to_rgb(fill)
+    else:
+        rgb = tuple(int(c) for c in fill)[:3]  # type: ignore[assignment]
+    rgb = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+    if rgb in _PIN_CACHE:
+        return _PIN_CACHE[rgb]
+
+    width, height = 120, 160
+    scale = 6  # supersample, then downscale for smooth anti-aliased edges
+    canvas = Image.new("RGBA", (width * scale, height * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    cx = width * scale / 2
+    radius = 50 * scale
+    cy = radius + 7 * scale
+    tip_y = (height - 4) * scale
+
+    # Head: sweep from just outside 180deg round the top to just past 0deg, so
+    # the arc wraps below the widest points and the shoulders curve inward.
+    arc: list[tuple[float, float]] = []
+    steps = 260
+    for i in range(steps + 1):
+        deg = 200 + (-20 - 200) * i / steps      # 200 -> -20 (clockwise)
+        a = math.radians(deg)
+        arc.append((cx + radius * math.cos(a), cy - radius * math.sin(a)))
+
+    # Right-hand taper: cubic Bézier from the right shoulder down to the tip.
+    p0 = arc[-1]
+    p1 = (cx + radius * 0.90, cy + radius * 0.85)
+    p2 = (cx + radius * 0.30, tip_y - radius * 0.55)
+    p3 = (cx, tip_y)
+    taper: list[tuple[float, float]] = []
+    for i in range(1, 200):
+        t = i / 200
+        mt = 1 - t
+        x = mt ** 3 * p0[0] + 3 * mt ** 2 * t * p1[0] + 3 * mt * t ** 2 * p2[0] + t ** 3 * p3[0]
+        y = mt ** 3 * p0[1] + 3 * mt ** 2 * t * p1[1] + 3 * mt * t ** 2 * p2[1] + t ** 3 * p3[1]
+        taper.append((x, y))
+
+    outline = arc + taper
+    outline += [(2 * cx - x, y) for (x, y) in reversed(outline)]   # mirror
+    draw.polygon(outline, fill=(*rgb, 255))
+
+    canvas = canvas.resize((width, height), Image.LANCZOS)
+    # White bail in the head, punched after downscaling so its edge stays crisp.
+    ImageDraw.Draw(canvas).ellipse(
+        [cx / scale - 16, cy / scale - 16, cx / scale + 16, cy / scale + 16],
+        fill=(255, 255, 255, 255),
+    )
+
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG", optimize=True)
+    uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    _PIN_CACHE[rgb] = uri
+    return uri
+
+
+
+# --- Hover card template -----------------------------------------------------
+# IMPORTANT: Streamlit's deck frontend substitutes ``{token}`` placeholders in
+# the tooltip *template* and HTML-escapes each substituted value. Putting a
+# finished HTML string in a data column and showing ``{tooltip}`` therefore
+# prints the markup as literal text. The markup must live here, in the template,
+# with only plain-text values coming from the row.
+MAP_TOOLTIP_HTML = (
+    "<div style='font-family:Inter,system-ui,-apple-system,sans-serif;"
+    "font-size:12px;line-height:1.4;color:#FFFFFF;width:{card_width}px'>"
+    # Photo, shown when one is available ...
+    "<img src='{photo_url}' width='{photo_width}' height='{photo_height}' "
+    "loading='lazy' decoding='async' alt='Listing photo' "
+    "style='border-radius:10px;object-fit:cover;display:{photo_display};"
+    "margin-bottom:9px;background:#2A2530;width:100%'/>"
+    # ... otherwise a labelled placeholder so the card never renders blank and
+    # still tells the user what kind of listing this is.
+    "<div style='display:{ph_display};align-items:center;justify-content:center;"
+    "flex-direction:column;gap:4px;height:{photo_height}px;margin-bottom:9px;"
+    "border-radius:10px;background:#242029;border:1px dashed rgba(255,255,255,.22)'>"
+    "<span style='font-size:22px'>\U0001F3E0</span>"
+    "<span style='opacity:.85;font-weight:600'>{room_text}</span>"
+    "<span style='opacity:.55;font-size:11px'>No photo available</span>"
+    "</div>"
+    "<div style='font-weight:750;font-size:13px;letter-spacing:-.01em;"
+    "margin-bottom:3px;white-space:nowrap;overflow:hidden;"
+    "text-overflow:ellipsis'>{name}</div>"
+    "<div style='color:#FFC6CF;font-weight:700;font-size:13px;"
+    "margin-bottom:6px'>{price_text}</div>"
+    "<div style='display:{chip_display};align-items:center;gap:6px;"
+    "margin-bottom:5px;flex-wrap:wrap'>"
+    "<span style='display:{rating_display};background:rgba(255,255,255,.10);"
+    "border:1px solid rgba(255,255,255,.16);border-radius:999px;"
+    "padding:1px 7px;font-weight:600'>{rating_text}</span>"
+    "<span style='display:{sentiment_display};background:rgba(255,56,92,.22);"
+    "border:1px solid rgba(255,56,92,.45);border-radius:999px;"
+    "padding:1px 7px;font-weight:600'>{sentiment_text}</span>"
+    "</div>"
+    "<div style='opacity:.82'>{reviews_text}</div>"
+    "<div style='opacity:.82'>{place_text}</div>"
+    "<div style='opacity:.82'>{room_text}</div>"
+    "</div>"
+)
+
+
 
 def filter_listings(
     df: pd.DataFrame,
@@ -881,7 +1722,9 @@ def build_map_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        Copy with ``sentiment_value``, ``colour`` and ``tooltip`` columns.
+        Copy with ``sentiment_value``, ``colour`` (review-ramp fill) and the
+        plain-text tooltip fields consumed by ``MAP_TOOLTIP_HTML``
+        (``photo_url``, ``name``, ``price_text``, ``chips`` and friends).
     """
     map_df = df.copy()
 
@@ -914,10 +1757,11 @@ def build_map_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     sentiment_text = sentiment.apply(lambda v: "n/a" if pd.isna(v) else f"{v:+.2f}")
 
     # Hover preview: the tooltip is raw HTML, so a small <img> appears the
-    # moment the pointer rests on a marker -- no click required. The photo
-    # column is produced by ``da.listing_photo_urls`` (Unsplash thumbnails at
-    # ~10 KB each, because the Kaggle file has no photo column), so hovers stay
-    # instant even with thousands of markers.
+    # moment the pointer rests on a pin -- no click required. Inside Airbnb
+    # publishes a real ``picture_url`` (Airbnb's own CDN), so the card shows the
+    # actual listing photo; ``da.listing_photo_urls`` only falls back to the
+    # curated Unsplash set for sources that ship no photo column (e.g. the
+    # legacy Kaggle file).
     if "picture_url" in map_df.columns:
         picture = map_df["picture_url"].fillna("").astype(str).str.strip()
     else:
@@ -932,48 +1776,42 @@ def build_map_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # contradiction. The chip simply disappears when sentiment is unavailable.
     sent_text = sentiment_text.where(sentiments_ok, "")
 
-    def _photo_html(url: str) -> str:
-        """Return the <img> tag for a listing photo, or '' when there is none."""
-        if not url.startswith("http"):
-            return ""
-        w, h = cfg.MAP_TOOLTIP_PHOTO_WIDTH, cfg.MAP_TOOLTIP_PHOTO_HEIGHT
-        # html.escape keeps a stray quote in a URL from breaking the markup.
-        return (
-            f"<img src='{html.escape(url, quote=True)}' width='{w}' height='{h}' "
-            "loading='lazy' decoding='async' alt='Listing photo' "
-            "style='border-radius:10px;object-fit:cover;display:block;"
-            "margin-bottom:9px;background:#2A2530'/>"
-        )
-
-    photo_html = picture.apply(_photo_html)
-    name_text = map_df["name"].astype(str).str.slice(0, 46).apply(html.escape)
-    place_text = (
-        map_df["neighbourhood"].astype(str).apply(html.escape) + ", "
-        + map_df["neighbourhood_group"].astype(str).apply(html.escape)
+    # All values below are PLAIN TEXT. Streamlit escapes each ``{token}`` it
+    # substitutes into MAP_TOOLTIP_HTML, so any HTML in these columns would show
+    # up as literal characters (that was the "raw HTML in the popup" bug). The
+    # markup lives in the template instead; only the data values are injected.
+    w, h = cfg.MAP_TOOLTIP_PHOTO_WIDTH, cfg.MAP_TOOLTIP_PHOTO_HEIGHT
+    map_df["photo_url"] = picture.where(picture.str.startswith("http"), "")
+    has_photo = map_df["photo_url"].ne("")
+    map_df["photo_display"] = has_photo.map(lambda ok: "block" if ok else "none")
+    map_df["ph_display"] = has_photo.map(lambda ok: "none" if ok else "flex")
+    map_df["card_width"] = w + 26
+    map_df["photo_width"] = w
+    map_df["photo_height"] = h
+    map_df["name"] = map_df["name"].astype(str).str.slice(0, 46)
+    map_df["place_text"] = (
+        map_df["neighbourhood"].astype(str) + ", "
+        + map_df["neighbourhood_group"].astype(str)
     )
-    room_text = map_df["room_type"].astype(str).apply(html.escape)
-    price_text = (
+    map_df["room_text"] = map_df["room_type"].astype(str)
+    map_df["price_text"] = (
         "$" + map_df["price"].round(0).astype(int).astype(str).str.replace(
-            r"(\d)(?=(\d{3})+$)", r"\1,", regex=True)
-        + " <span style='font-weight:500;opacity:.7'>/ night</span>"
+            r"(\d)(?=(\d{3})+$)", r"\1,", regex=True) + " / night"
     )
-    review_text = map_df["number_of_reviews"].astype(int).astype(str) + " reviews"
+    map_df["reviews_text"] = (
+        map_df["number_of_reviews"].astype(int).astype(str) + " reviews"
+    )
 
-    # Rating chip: the Kaggle file ships review_scores_rating as an empty
-    # column (100% null), so the chip is only rendered when the column actually
-    # holds values. An always-empty "No rating" pill would be noise. Rows with a
-    # missing score get ``display:none`` rather than an empty pill.
+    # Rating chip: only rendered when the column actually holds values. Inside
+    # Airbnb populates ``review_scores_rating`` for listings with enough
+    # reviews, while the legacy Kaggle file ships it 100% null; either way, an
+    # always-empty "No rating" pill would be noise, so rows with a missing score
+    # get ``display:none`` rather than an empty pill.
     if "review_scores_rating" in map_df.columns:
         rating = pd.to_numeric(map_df["review_scores_rating"], errors="coerce")
     else:
         rating = pd.Series(float("nan"), index=map_df.index)
     rating_text = rating.map(lambda v: "" if pd.isna(v) else f"{v:.1f} / 5")
-    rating_style = rating_text.map(
-        lambda txt: "display:none" if txt == ""
-        else "background:rgba(255,255,255,.10);"
-             "border:1px solid rgba(255,255,255,.16);"
-             "border-radius:999px;padding:1px 7px;font-weight:600"
-    )
 
     # Inline styles only (the tooltip renders in its own overlay), matched to
     # the theme so the card looks like part of the product rather than a
@@ -981,36 +1819,24 @@ def build_map_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # line, so the card never shows a half-empty row: neither chip present means
     # no pill row at all.
     pills_shown = sentiments_ok | rating_text.ne("")
-    pills_flex = pills_shown.map(
-        lambda ok: "display:flex;align-items:center;gap:6px;margin-bottom:5px;"
-                   "flex-wrap:wrap" if ok else "display:none"
+    # Only plain text crosses into the tooltip template -- Streamlit escapes
+    # every substituted value, so the pill markup itself lives in
+    # MAP_TOOLTIP_HTML and each row supplies just the label + a display flag.
+    map_df["chip_display"] = pills_shown.map(lambda ok: "flex" if ok else "none")
+    map_df["rating_text"] = rating_text
+    map_df["rating_display"] = rating_text.map(lambda t: "inline-block" if t else "none")
+    map_df["sentiment_text"] = [
+        (f"{badge} {txt}".strip() if ok and (badge or txt) else "")
+        for ok, badge, txt in zip(sentiments_ok, sent_badge, sent_text)
+    ]
+    map_df["sentiment_display"] = map_df["sentiment_text"].map(
+        lambda t: "inline-block" if t else "none"
     )
-    sent_span_style = sentiments_ok.map(
-        lambda ok: ("background:rgba(255,56,92,.22);"
-                    "border:1px solid rgba(255,56,92,.45);border-radius:999px;"
-                    "padding:1px 7px;font-weight:600") if ok
-        else "display:none"
-    )
-
+    # ``tooltip`` keeps a plain-text one-liner for exports/downloads and for the
+    # gallery fallback; the map itself renders MAP_TOOLTIP_HTML.
     map_df["tooltip"] = (
-        "<div style=\"font-family:Inter,system-ui,-apple-system,sans-serif;"
-        "font-size:12px;line-height:1.4;color:#FFFFFF;width:"
-        f"{cfg.MAP_TOOLTIP_PHOTO_WIDTH + 26}px\">"
-        + photo_html
-        + "<div style='font-weight:750;font-size:13px;letter-spacing:-.01em;"
-          "margin-bottom:3px;white-space:nowrap;overflow:hidden;"
-          "text-overflow:ellipsis'>" + name_text + "</div>"
-        + "<div style='color:#FFC6CF;font-weight:700;font-size:13px;"
-          "margin-bottom:6px'>" + price_text + "</div>"
-        + "<div style='" + pills_flex + "'>"
-        + "<span style='" + rating_style + "'>" + rating_text + "</span>"
-        + "<span style='" + sent_span_style + "'>"
-        + sent_badge + " " + sent_text + "</span>"
-        + "</div>"
-        + "<div style='opacity:.82'>" + review_text + "</div>"
-        + "<div style='opacity:.82'>" + place_text + "</div>"
-        + "<div style='opacity:.82'>" + room_text + "</div>"
-        + "</div>"
+        map_df["name"] + " | " + map_df["price_text"] + " | "
+        + map_df["place_text"]
     )
     map_df["sentiment_known"] = sentiments_ok
     return map_df
@@ -1130,15 +1956,16 @@ def make_deck(
     satellite: bool = False,
 ) -> pdk.Deck:
     """
-    Assemble the pydeck map with a heatmap layer plus clustered markers.
+    Assemble the pydeck map with a heatmap layer plus black map pins.
 
-    Clustering strategy
-    -------------------
-    NYC holds ~48k listings, far too many individual markers to read. deck.gl's
-    ``ColumnLayer`` aggregates nearby listings into one extruded hexagon whose
-    height encodes how many reviews it covers -- the deck.gl-native equivalent
-    of marker clustering, and it stays smooth at 48k points. Turning clustering
-    off falls back to individual ``ScatterplotLayer`` dots.
+    Marker style
+    ------------
+    Every listing is drawn as a classic black map pin (a rasterised PNG
+    ``IconLayer`` icon, see :func:`pin_icon_uri`) whose tip sits exactly on the
+    listing's coordinate. This replaces the earlier extruded ``ColumnLayer``
+    columns: a pin reads as "this exact address", needs no 3D camera angle, and
+    stays legible at every zoom. ``cluster`` now only tunes the pin size, since
+    both modes draw one pin per listing.
 
     Basemaps
     --------
@@ -1158,7 +1985,8 @@ def make_deck(
     show_heatmap:
         Draw the review-density heatmap layer.
     cluster:
-        Aggregate markers into hexagon columns instead of individual dots.
+        Draw slightly larger pins (kept as the "compact pins" toggle so the UI
+        is unchanged). Both modes draw one black map pin per listing.
     dark:
         Use the dark Carto basemap rather than the light one. Ignored when
         ``satellite`` is True.
@@ -1193,71 +2021,86 @@ def make_deck(
             )
         )
 
-    # On satellite imagery neither the coral nor the blue end of the review ramp
-    # survives a bright rooftop or a green park on its own, so every marker gets
-    # an opaque white outline (a halo). On the vector basemaps a softer outline
-    # is enough. The halo is drawn as a slightly larger backdrop layer so it
-    # reads as a ring rather than as a fat border.
-    outline = [255, 255, 255, 235] if satellite else [255, 255, 255, 120]
+    # A soft white disc is drawn under the pins on satellite imagery only: the
+    # black pin can disappear against dark rooftops and water, and this keeps it
+    # separated from the basemap without hiding the photography around it.
+    if not map_df.empty:
+        # Every listing gets the classic black map pin. The icon is generated
+        # once and shared by all rows (a single PNG data-URI), which keeps a
+        # 6k-row frame cheap and guarantees the image decodes -- an undecodable
+        # icon also kills hit-testing, which is what stopped hover cards
+        # appearing before.
+        pin_uri = pin_icon_uri()
+        map_df = map_df.assign(icon=pin_uri)
 
-    if satellite and not map_df.empty:
+        if satellite:
+            # A soft white disc under each pin keeps the black pin visible over
+            # dark rooftops and water without hiding the imagery.
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    id="marker-halo",
+                    data=map_df,
+                    get_position=["longitude", "latitude"],
+                    get_fill_color=[255, 255, 255, 150],
+                    get_radius=80,
+                    radius_min_pixels=4,
+                    radius_max_pixels=14,
+                    opacity=0.55,
+                    pickable=False,
+                )
+            )
+
+        # Clustering on/off now only changes the pin size: both modes draw one
+        # pin per listing (the request was "replace the columns with a pin").
+        pin_size = (34 if cluster else 42) if satellite else (32 if cluster else 40)
         layers.append(
             pdk.Layer(
-                "ScatterplotLayer",
-                id="marker-halo",
+                "IconLayer",
+                id="listing-pins",
                 data=map_df,
+                get_icon="icon",
                 get_position=["longitude", "latitude"],
-                get_fill_color=[255, 255, 255, 210],
-                get_radius=120,
-                radius_min_pixels=5,
-                radius_max_pixels=22,
-                opacity=0.55,
-                pickable=False,
+                get_size=pin_size,
+                sizeUnits="pixels",
+                sizeScale=1,
+                sizeMinPixels=18,
+                sizeMaxPixels=64,
+                # The pin's point is at the bottom of the image, so anchoring at
+                # (0.5, 1.0) puts the *tip* on the coordinate.
+                get_anchor_x=0.5,
+                get_anchor_y=1.0,
+                pickable=True,
+                auto_highlight=True,
+                highlight_color=[255, 56, 92, 110],
             )
         )
 
-    if cluster and not map_df.empty:
-        layers.append(
-            pdk.Layer(
-                "ColumnLayer",
-                data=map_df,
-                get_position=["longitude", "latitude"],
-                get_fill_color="colour",
-                radius=260,
-                elevation_scale=8,
-                elevation_range=[0, 2200],
-                get_elevation="number_of_reviews",
-                extruded=True,
-                pickable=True,
-                auto_highlight=True,
-                opacity=0.9 if satellite else 0.85,
-                # Outlined on both basemaps: the white edge is what stops the
-                # columns bleeding into each other at a low zoom.
-                stroked=True,
-                get_line_color=outline,
-                line_width_min_pixels=2 if satellite else 1,
-            )
-        )
-    elif not map_df.empty:
+        # Reliable hover target: a generously-sized disc over each pin tip. A
+        # thin pin is fiddly to hover, and this layer guarantees a pickable
+        # object at every listing, so the photo card always appears. The disc is
+        # *near*-transparent rather than fully transparent: deck.gl skips picking
+        # pixels with zero alpha, so alpha 0 would make the layer unhoverable.
         layers.append(
             pdk.Layer(
                 "ScatterplotLayer",
+                id="listing-hit-targets",
                 data=map_df,
                 get_position=["longitude", "latitude"],
-                get_fill_color="colour",
-                get_radius=70,
-                radius_min_pixels=4,
-                radius_max_pixels=18,
+                get_radius=16,
+                radius_units="pixels",
+                radius_min_pixels=16,
+                radius_max_pixels=26,
+                get_fill_color=[0, 0, 0, 1],
                 pickable=True,
-                auto_highlight=True,
-                stroked=True,
-                get_line_color=outline,
-                line_width_min_pixels=2 if satellite else 1,
             )
         )
 
     if satellite:
-        map_style: Any = satellite_style()
+        # A string data-URI, not the raw dict: st.pydeck_chart's frontend calls
+        # mapStyle.includes(...), which only exists on strings. See
+        # satellite_style_uri().
+        map_style: Any = satellite_style_uri()
     else:
         map_style = BASEMAP_DARK if dark else BASEMAP_LIGHT
 
@@ -1269,19 +2112,17 @@ def make_deck(
         layers=layers,
         initial_view_state=view_state,
         map_style=map_style,
-        # pydeck only accepts a dict ``map_style`` together with the "mapbox"
-        # provider value; it means "use the style document I supplied", not
-        # "use Mapbox's servers". No Mapbox token is read or sent -- the style
-        # above points at Esri's public tile service -- so this keeps the
-        # satellite view key-free, unlike a native Mapbox satellite style.
+        # "mapbox" here only tells deck.gl "use the style document I supplied"
+        # rather than one of its named presets; no Mapbox token is read or sent.
+        # The satellite style points at Esri's public tile service and the
+        # Dark/Light styles at CARTO, so every basemap stays key-free.
         map_provider="mapbox",
-        # ``html`` is evaluated by deck.gl against the hovered row, so the
-        # ``{tooltip}`` placeholder is replaced with the photo card built in
-        # ``build_map_dataframe``. deck.gl shows it on hover (not click), which
-        # is exactly the interaction asked for; the style block only draws the
-        # floating panel around it.
+        # The HTML template lives in MAP_TOOLTIP_HTML; only plain-text values
+        # (photo_url, name, price_text, chips, ...) are injected per row, which
+        # Streamlit escapes for safety. Putting finished markup in a data column
+        # and show``{tooltip}`` would print it as literal text.
         tooltip={
-            "html": "{tooltip}",
+            "html": MAP_TOOLTIP_HTML,
             "style": {
                 "backgroundColor": "#12100F",
                 "color": "#F4F0EC",
@@ -1477,8 +2318,9 @@ def render_map_controls(top_reviewed: pd.DataFrame) -> dict[str, Any]:
             )
         with row2[3]:
             cluster = st.toggle(
-                "Cluster Markers", value=True,
-                help="Aggregate nearby listings into hexagonal columns.",
+                "Compact Pins", value=True,
+                help="Draw smaller map pins so dense areas stay readable. Turn "
+                     "off for larger pins.",
             )
 
         search = st.text_input(
@@ -1518,9 +2360,9 @@ def _map_legend(basemap: str) -> str:
     return (
         "<div class='map-legend'>"
         "<span><span class='gradient'></span>Fewer to more reviews</span>"
-        "<span><span class='swatch' style='background:#FF385C'></span>"
-        "Column height = review volume</span>"
-        "<span>Hover a marker for the listing photo</span>"
+        "<span><span class='swatch' style='background:#000000'></span>"
+        "Black pin = one listing</span>"
+        "<span>Hover a pin for the listing photo</span>"
         f"<span style='margin-left:auto;opacity:.65'>"
         f"Basemap: {html.escape(basemap)} &middot; {html.escape(source)}"
         "</span>"
@@ -1548,14 +2390,14 @@ def render_map_tab(top_reviewed: pd.DataFrame) -> pd.DataFrame:
         The filtered listings (empty when nothing matches).
     """
     st.markdown(
-        f"### {material_icon('map', 22)} Where Are The Most-Reviewed Stays?",
+        "### Where Are The Most-Reviewed Stays?",
         unsafe_allow_html=True,
     )
     st.caption(
-        "Marker height and colour encode review volume. **Hover any marker** for "
-        "a hover card with that listing's photo, price, rating and review "
-        "sentiment. The satellite basemap is the default; switch to Dark or "
-        "Light for the CARTO vector styles."
+        "Each black map pin marks one listing, with its tip on the exact spot. "
+        "**Hover any pin** for a card with that listing's photo, price, rating "
+        "and review sentiment. The satellite basemap is the default; switch to "
+        "Dark or Light for the CARTO vector styles."
     )
 
     if top_reviewed.empty:
@@ -1692,14 +2534,13 @@ def render_eda_tab(
     None
     """
     st.markdown(
-        f"### {material_icon('insights', 22)} Exploratory Data Analysis",
+        "### Exploratory Data Analysis",
         unsafe_allow_html=True,
     )
     st.caption("All figures use the cleaned listings table unless stated otherwise.")
 
     # --- 1. data quality --------------------------------------------------
-    st.markdown(f"#### {material_icon('cleaning', 18)} Data Quality And Preprocessing",
-                unsafe_allow_html=True)
+    st.markdown("#### Data Quality And Preprocessing", unsafe_allow_html=True)
     outliers = audit.get("outliers", {}) or {}
     quality = da.data_quality_report(raw_listings, raw_reviews)
 
@@ -1728,9 +2569,9 @@ def render_eda_tab(
                                "IQR fence plus business ceiling"),
                     unsafe_allow_html=True)
         st.write(
-            f"- Price must be **> \\\\$0** and **<= \\\\${outliers.get('applied_ceiling', 'n/a')}** "
-            f"(Q3 + 1.5 x IQR = \\\\${outliers.get('upper_fence', 'n/a')}, capped at the "
-            f"\\\\${outliers.get('price_max', cfg.PRICE_MAX):,.0f} business ceiling)."
+            f"- Price must be **above $ 0** and **at most $ {outliers.get('applied_ceiling', 'n/a')}** "
+            f"(Q3 + 1.5 x IQR = $ {outliers.get('upper_fence', 'n/a')}, capped at the "
+            f"$ {outliers.get('price_max', cfg.PRICE_MAX):,.0f} business ceiling)."
         )
         st.write(f"- Price outliers removed: **{int(outliers.get('rows_removed', 0)):,}**")
         st.write(f"- Missing-coordinate rows removed: **{quality['missing_coordinates']:,}**")
@@ -1740,8 +2581,7 @@ def render_eda_tab(
 
 
     # --- 2. "top reviewed" definition -------------------------------------
-    st.markdown(f"#### {material_icon('premium', 18)} How \\\"Top Reviewed\\\" Is Defined",
-                unsafe_allow_html=True)
+    st.markdown('#### How "Top Reviewed" Is Defined', unsafe_allow_html=True)
     st.markdown(
         f"A listing qualifies when it has at least **{cfg.TOP_REVIEWED_MIN_REVIEWS} "
         f"reviews** and sits in the top **{int((1 - cfg.TOP_REVIEWED_QUANTILE) * 100)}% "
@@ -1766,8 +2606,7 @@ def render_eda_tab(
     st.space("medium")
 
     # --- 3. distributions -------------------------------------------------
-    st.markdown(f"#### {material_icon('bar_chart', 18)} Distributions",
-                unsafe_allow_html=True)
+    st.markdown("#### Distributions", unsafe_allow_html=True)
     left, right = card_row("distributions", 2)
     with left:
         st.plotly_chart(eda.plot_price_distribution(clean), width="stretch")
@@ -1777,8 +2616,7 @@ def render_eda_tab(
     st.space("medium")
 
     # --- 4. borough volume (the rubric's bar chart) -----------------------
-    st.markdown(f"#### {material_icon('map', 18)} Volume By Borough",
-                unsafe_allow_html=True)
+    st.markdown("#### Volume By Borough", unsafe_allow_html=True)
     left, right = card_row("boroughs", 2)
     with left:
         st.plotly_chart(eda.plot_top_reviewed_by_borough(top_reviewed), width="stretch")
@@ -1788,8 +2626,7 @@ def render_eda_tab(
     st.space("medium")
 
     # --- 5. correlations --------------------------------------------------
-    st.markdown(f"#### {material_icon('hub', 18)} Correlation Analysis",
-                unsafe_allow_html=True)
+    st.markdown("#### Correlation Analysis", unsafe_allow_html=True)
     left, right = card_row("correlations", [1.1, 1])
     with left:
         st.plotly_chart(eda.plot_correlation_heatmap(clean), width="stretch")
@@ -1860,7 +2697,7 @@ def render_ai_tab(
     None
     """
     st.markdown(
-        f"### {material_icon('concierge', 22)} NYC Travel Concierge",
+        "### NYC Travel Concierge",
         unsafe_allow_html=True,
     )
     st.caption(
@@ -1893,7 +2730,10 @@ def render_ai_tab(
 
     generate_col, status_col = st.columns([1, 2], vertical_alignment="center")
     with generate_col:
-        generate = st.button("Generate Travel Guide", type="primary", width="stretch",
+        # Plain (not ``type="primary"``): the stylesheet paints every button as
+        # the outlined editorial treatment, and a filled primary button would
+        # need an override just to look like the rest of the page.
+        generate = st.button("Generate Travel Guide", width="stretch",
                              icon=":material/auto_awesome:")
     with status_col:
         st.caption(f"Summarising {len(working):,} listings using the "
@@ -1937,8 +2777,7 @@ def render_ai_tab(
     )
 
     st.space("medium")
-    st.markdown(f"#### {material_icon('concierge', 18)} Ask A Follow-Up",
-                unsafe_allow_html=True)
+    st.markdown("#### Ask A Follow-Up", unsafe_allow_html=True)
     question = st.text_input(
         "Your question",
         placeholder="e.g. Which borough is best for a $150 budget with the best reviews?",
@@ -1985,8 +2824,8 @@ def main() -> None:
             f"whatever is available.\n\n`{load_error}`"
         )
     if raw_listings is None or raw_listings.empty:
-        st.error("No listings could be loaded. Add Kaggle credentials (README "
-                 "step 3), or keep running on the offline demo data.")
+        st.error("No listings could be loaded. Check the network connection to "
+                 "insideairbnb.com, or keep running on the offline demo data.")
         st.stop()
 
     # --- 2. Phase 2: clean + select top reviewed --------------------------
@@ -2027,7 +2866,11 @@ def main() -> None:
                    icon=":material/image_not_supported:")
 
     # --- 4. tabs ----------------------------------------------------------
-    map_tab, eda_tab, ai_tab = st.tabs([
+    # The tabs live inside a keyed container so the hero's CTA can scroll to
+    # them (#guide); st.container(key=...) is the only way to give a block an
+    # id/class in Streamlit 1.6x.
+    guide_container = st.container(key="guide")
+    map_tab, eda_tab, ai_tab = guide_container.tabs([
         ":material/map: Map",
         ":material/insights: EDA Insights",
         ":material/smart_toy: AI Travel Guide",
@@ -2060,11 +2903,17 @@ def main() -> None:
 
     st.space("large")
     st.html(
-        "<div style='border-top:1px solid var(--border-color);padding-top:1rem;"
-        "font-size:.78rem;color:var(--text-color);opacity:.62;line-height:1.6'>"
+        "<div style='border-top:1px solid var(--editorial-rule);padding-top:1.4rem;"
+        "font-family:var(--editorial-sans);font-size:.62rem;font-weight:300;"
+        "letter-spacing:.22em;text-transform:uppercase;"
+        "color:var(--editorial-muted);line-height:2'>"
         "Built with Streamlit, PyDeck, Plotly, VADER/TextBlob and an LLM API. "
-        "Data: Kaggle NYC Airbnb Open Data + Inside Airbnb reviews. "
-        "Geocoding: OpenStreetMap Nominatim. Photos: Unsplash. "
+        f"Data: <a href='https://insideairbnb.com/new-york-city/' "
+        "target='_blank' rel='noopener' style='color:var(--editorial-ink)'>"
+        "Inside Airbnb</a> "
+        f"({html.escape(cfg.INSIDE_AIRBNB_LICENSE)}), "
+        f"NYC snapshot {html.escape(cfg.INSIDE_AIRBNB_SNAPSHOT)}. "
+        "Geocoding: OpenStreetMap Nominatim. "
         "Basemaps: Esri World Imagery, CARTO.</div>"
     )
 

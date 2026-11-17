@@ -30,4 +30,7 @@ archive.zip
 *.log
 
 # Assignment brief (not part of the deliverable)
+# Note: the presentation PDF IS part of the deliverable, so the broad *.pdf rule
+# is paired with an explicit negation. Git ignore rules are last-match-wins.
 *.pdf
+!Final Project Presentation.pdf

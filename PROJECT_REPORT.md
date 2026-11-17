@@ -27,21 +27,20 @@ publishes NYC, Albany and Rochester for New York.
 
 Four phases, each in its own module so it can be tested independently.
 
-**Phase 1 — Data acquisition** (`data_acquisition.py`). Two datasets are needed
-because the listings file contains no review text.
+**Phase 1 — Data acquisition** (`data_acquisition.py`). One snapshot supplies both
+tables, so listing IDs join exactly by construction.
 
 | Dataset | Source | Size |
 |---|---|---|
-| `AB_NYC_2019.csv` | **Kaggle API** (`dgomonov/new-york-city-airbnb-open-data`, CC0) | 48,895 × 18 |
-| Review comments | Inside Airbnb NYC archive | 200,000 |
+| `listings.csv.gz` | **Inside Airbnb**, NYC snapshot 2026-09-14 (CC BY 4.0) | 29,918 × 89 |
+| `reviews.csv.gz` | **Inside Airbnb**, same snapshot | 100,000 |
 
-Review text comes from the Inside Airbnb archive — the same upstream source the
-Kaggle file derives from — so listing IDs join cleanly (92.6% of sampled reviews
-matched). A second, keyless API, **OpenStreetMap Nominatim**, converts place
-names into coordinates for the map's search box. Downloads are cached in `data/`.
-If no credentials or network are available, a synthetic fallback generates
-schema-identical data and the UI displays a warning banner, so fake data is never
-presented as real.
+A second, keyless API, **OpenStreetMap Nominatim**, converts place names into
+coordinates for the map's search box. Downloads are cached in `data/`. The Kaggle
+`AB_NYC_2019.csv` file is retained only as a legacy fallback, used when Kaggle
+credentials exist and Inside Airbnb is unreachable. If no source and no network
+are available, a synthetic fallback generates schema-identical data and the UI
+displays a warning banner, so fake data is never presented as real.
 
 **Phase 2 — Cleaning and EDA** (`eda.py`). Rows without coordinates are dropped
 (the map cannot plot them) and missing `name`/`host_name` are filled. Price is
